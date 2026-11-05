@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from .. import repo
@@ -18,6 +19,18 @@ KIND_TITLES = {"role": "身份与职责", "goal": "长期目标", "project": "�
 KIND_ORDER = ["role", "goal", "project", "deadline", "preference", "habit", "interest", "person", "note"]
 
 
+def _latest_progress(facts: list[dict]) -> dict[str, str]:
+    """project name -> its newest progress note (`进展·…`, value starts with （project name）)."""
+    out: dict[str, tuple[str, str]] = {}
+    for f in facts:
+        if not f["key"].startswith("进展·"):
+            continue
+        m = re.match(r"^（(.+?)）(.*)$", f["value"], re.S)
+        if m and (m.group(1) not in out or f["updated_at"] > out[m.group(1)][0]):
+            out[m.group(1)] = (f["updated_at"], m.group(2).strip())
+    return {k: v[1] for k, v in out.items()}
+
+
 def context_brief(max_chars: int = 3500) -> str:
     """Compact markdown description of the user for prompts."""
     facts = repo.list_facts(status="active")
@@ -28,7 +41,9 @@ def context_brief(max_chars: int = 3500) -> str:
     by_kind: dict[str, list[dict]] = {}
     for f in facts:
         by_kind.setdefault(f["kind"], []).append(f)
-    limits = {"project": 10, "person": 5, "note": 5, "interest": 6}
+    limits = {"project": 12, "person": 5, "note": 5, "interest": 6}
+    progress = _latest_progress(by_kind.get("note", []))
+    by_kind["note"] = [f for f in by_kind.get("note", []) if not f["key"].startswith("进展·")]   # shown under their project
     feedback = [f for f in by_kind.get("note", []) if f["key"].startswith("反馈·")]
     if feedback:
         by_kind["note"] = [f for f in by_kind["note"] if not f["key"].startswith("反馈·")]
@@ -42,6 +57,8 @@ def context_brief(max_chars: int = 3500) -> str:
         lines.append(f"### {KIND_TITLES.get(kind, kind)}")
         for f in items[: limits.get(kind, 8)]:
             lines.append(f"- **{f['key']}**：{f['value']}")
+            if kind == "project" and progress.get(f["key"]):
+                lines.append(f"  - 最新进展：{progress[f['key']][:140]}")
     out = "\n".join(lines)
     if len(out) > max_chars:
         out = out[: max_chars - 20] + "\n…（已截断）"
@@ -58,12 +75,17 @@ def render_profile() -> str:
     by_kind: dict[str, list[dict]] = {}
     for f in facts:
         by_kind.setdefault(f["kind"], []).append(f)
+    progress = _latest_progress(by_kind.get("note", []))
+    by_kind["note"] = [f for f in by_kind.get("note", []) if not f["key"].startswith(("进展·", "反馈·"))]
     for kind in KIND_ORDER:
         if by_kind.get(kind):
             md.append(f"## {KIND_TITLES.get(kind, kind)}")
             for f in by_kind[kind]:
                 pin = " 📌" if f["pinned"] else ""
-                md.append(f"- **{f['key']}**{pin}：{f['value']}  <sub>({f['source'] or '-'}, {f['confidence']:.1f})</sub>")
+                conf = f"（置信度 {f['confidence']:.1f}）" if f["confidence"] < 1 else ""
+                md.append(f"- **{f['key']}**{pin}：{f['value']}{conf}")
+                if kind == "project" and progress.get(f["key"]):
+                    md.append(f"  - 最新进展：{progress[f['key']]}")
             md.append("")
     text = "\n".join(md)
     path = load_config().path("context") / "profile.md"
