@@ -140,3 +140,21 @@ def test_meta_timezone_and_failure_series(client):
     assert client.get("/api/meta").json()["timezone"] == "Asia/Shanghai"
     d = client.get("/api/dashboard?days=5").json()
     assert len(d["series"]["failures"]) == 5 and sum(d["series"]["failures"]) == 1
+
+
+def test_mail_people_parsing_handles_all_stored_shapes():
+    from awos.mailstore import _people
+    one = '{"mail":"a@x.org","name":"Amy"}'
+    many = '{"mail":"a@x.org","name":"Amy"},{"mail":"b@x.org","name":"b@x.org"},{"mail":"c@x.org","name":""}'
+    assert _people(one) == ["Amy <a@x.org>"]
+    assert _people(many) == ["Amy <a@x.org>", "b@x.org", "c@x.org"]      # unbracketed list, name==mail and empty name
+    assert _people('[{"mail":"a@x.org","name":"Amy"}]') == ["Amy <a@x.org>"]
+    assert _people(b'{"mail":"a@x.org","name":"Amy"}') == ["Amy <a@x.org>"] and _people(None) == [] and _people("plain text") == ["plain text"]
+
+
+def test_mail_people_parsing_handles_double_encoded_arrays():
+    import json
+    from awos.mailstore import _people
+    raw = json.dumps([json.dumps({"mail": "a@x.org", "name": "王工 Amy"}, ensure_ascii=False), json.dumps({"mail": "b@x.org", "name": ""})],
+                     ensure_ascii=False)
+    assert _people(raw) == ["王工 Amy <a@x.org>", "b@x.org"]

@@ -124,16 +124,27 @@ def _people(raw: Any) -> list[str]:
     s = _s(raw).strip()
     if not s:
         return []
-    try:
-        v = json.loads(s)
-    except ValueError:
+    v: Any = None
+    # Mail Master stores one recipient as {"mail":..,"name":..} and several as comma-joined objects WITHOUT brackets.
+    for candidate in (s, f"[{s}]"):
+        try:
+            v = json.loads(candidate)
+            break
+        except ValueError:
+            continue
+    if v is None:
         return [s[:200]]
     items = v if isinstance(v, list) else [v]
     out = []
     for it in items:
+        if isinstance(it, str) and it.lstrip().startswith("{"):  # real data: an array of JSON *strings*, each an object
+            try:
+                it = json.loads(it)
+            except ValueError:
+                pass
         if isinstance(it, dict):
             name, mail = it.get("name") or "", it.get("mail") or it.get("address") or ""
-            out.append(f"{name} <{mail}>".strip() if mail else name)
+            out.append(f"{name} <{mail}>".strip() if mail and name and name != mail else (mail or name))
         elif it:
             out.append(str(it))
     return out
