@@ -47,6 +47,8 @@ def rework_task(task_id: str, feedback: str, actor: str = "user") -> None:
     """Send a reviewed deliverable back to the agents with feedback."""
     _append_note(task_id, f"[返工意见] {feedback}", actor)
     t = repo.get_task(task_id)
+    cancel_task_runs(task_id)
+    repo.merge_task_meta(task_id, last_feedback=feedback)
     repo.update_task(task_id, actor=actor, max_attempts=max(t["max_attempts"], t["attempts"] + 2))
     repo.set_task_status(task_id, TaskStatus.READY, "rework requested", actor=actor, force=True)
 
@@ -54,17 +56,27 @@ def rework_task(task_id: str, feedback: str, actor: str = "user") -> None:
 def complete_task(task_id: str, actor: str = "user", note: str | None = None) -> None:
     if note:
         _append_note(task_id, note, actor)
+    cancel_task_runs(task_id)
     repo.set_task_status(task_id, TaskStatus.DONE, note or "completed by user", actor=actor, force=True)
-    from .scheduler import on_task_finished
+    from .worker import on_task_finished
     on_task_finished(task_id)
 
 
 def cancel_task_runs(task_id: str) -> int:
+    """Signal cancel to queued and running runs of a task (queued ones abort before starting)."""
     from ..llm import cancel_run
     n = 0
-    for r in repo.list_runs(task_id=task_id, status="running"):
-        n += 1 if cancel_run(r["id"]) else 0
+    for st in ("running", "queued"):
+        for r in repo.list_runs(task_id=task_id, status=st):
+            n += 1 if cancel_run(r["id"]) else 0
     return n
+
+
+def _stop_side_effects(task_id: str) -> None:
+    """Withdraw approvals that have not started executing (pending or approved-but-not-started)."""
+    for st in ("pending", "approved"):
+        for a in repo.list_approvals(status=st, task_id=task_id):
+            repo.set_approval_status(a["id"], "cancelled", expect=st)
 
 
 def cancel_task(task_id: str, actor: str = "user", reason: str | None = None) -> None:
@@ -74,15 +86,19 @@ def cancel_task(task_id: str, actor: str = "user", reason: str | None = None) ->
             cancel_task(ch["id"], actor=actor, reason="parent cancelled")
     for a in repo.list_approvals(status="pending", task_id=task_id):
         repo.set_approval_status(a["id"], "cancelled", expect="pending")
+    _stop_side_effects(task_id)
     repo.set_task_status(task_id, TaskStatus.CANCELLED, reason or "cancelled by user", actor=actor, force=True)
 
 
 def dismiss_task(task_id: str, actor: str = "user", reason: str | None = None) -> None:
+    cancel_task_runs(task_id)
+    _stop_side_effects(task_id)
     repo.set_task_status(task_id, TaskStatus.DISMISSED, reason or "dismissed", actor=actor, force=True)
 
 
 def snooze_task(task_id: str, hours: float = 24, actor: str = "user") -> None:
     until = (datetime.utcnow() + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cancel_task_runs(task_id)
     repo.update_task(task_id, actor=actor, snoozed_until=until)
     repo.set_task_status(task_id, TaskStatus.SNOOZED, f"snoozed until {until}", actor=actor, force=True)
 

@@ -58,7 +58,7 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
@@ -76,73 +76,130 @@ def init_db(path: Path) -> None:
             row = conn.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
                 conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
+            elif row["version"] > SCHEMA_VERSION:
+                raise RuntimeError(f"database schema v{row['version']} is newer than this code (v{SCHEMA_VERSION})")
         finally:
             conn.close()
         _initialized.add(key)
 
 
+# One connection per database file shared by all threads, serialized by a re-entrant lock.
+# This avoids multi-connection WAL write/checkpoint races (see SQLite WAL-reset advisory for 3.50.x) and lets
+# transactions nest: inner tx() blocks simply join the outer transaction.
+_conns: dict[str, sqlite3.Connection] = {}
+_conns_lock = threading.Lock()
+LOCK = threading.RLock()
+
+
 def get_conn() -> sqlite3.Connection:
     path = load_config().db_path
-    conns: dict[str, sqlite3.Connection] = getattr(_local, "conns", None) or {}
-    _local.conns = conns
     key = str(path)
-    if key not in conns:
-        init_db(path)
-        conns[key] = _connect(path)
-    return conns[key]
+    conn = _conns.get(key)
+    if conn is None:
+        with _conns_lock:
+            conn = _conns.get(key)
+            if conn is None:
+                init_db(path)
+                conn = _connect(path)
+                _conns[key] = conn
+    return conn
 
 
 def close_thread_conns() -> None:
-    for c in (getattr(_local, "conns", None) or {}).values():
-        try:
-            c.close()
-        except sqlite3.Error:
-            pass
-    _local.conns = {}
+    """Close all shared connections (tests / shutdown)."""
+    with _conns_lock, LOCK:
+        for c in _conns.values():
+            try:
+                c.close()
+            except sqlite3.Error:
+                pass
+        _conns.clear()
+
+
+def after_commit(fn) -> None:
+    """Run fn after the current transaction commits (immediately when not inside tx())."""
+    pending = getattr(_local, "after_commit", None)
+    if getattr(_local, "depth", 0) > 0 and pending is not None:
+        pending.append(fn)
+    else:
+        fn()
 
 
 class tx:
-    """`with tx() as c:` -> BEGIN IMMEDIATE ... COMMIT/ROLLBACK (serializes writers)."""
+    """`with tx() as c:` -> BEGIN IMMEDIATE ... COMMIT/ROLLBACK. Re-entrant: nested blocks join the outer tx."""
 
     def __enter__(self) -> sqlite3.Connection:
+        LOCK.acquire()
         self.c = get_conn()
-        self.c.execute("BEGIN IMMEDIATE")
+        depth = getattr(_local, "depth", 0)
+        if depth == 0:
+            _local.after_commit = []
+            try:
+                self.c.execute("BEGIN IMMEDIATE")
+            except BaseException:
+                LOCK.release()
+                raise
+        _local.depth = depth + 1
         return self.c
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if exc_type is None:
-            self.c.execute("COMMIT")
-        else:
-            self.c.execute("ROLLBACK")
+        _local.depth -= 1
+        try:
+            if _local.depth == 0:
+                callbacks = _local.after_commit or []
+                _local.after_commit = None
+                if exc_type is None:
+                    try:
+                        self.c.execute("COMMIT")
+                    except BaseException:
+                        try:
+                            self.c.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                        raise
+                    for fn in callbacks:
+                        try:
+                            fn()
+                        except Exception:  # pragma: no cover - callbacks are best effort (bus)
+                            pass
+                else:
+                    try:
+                        self.c.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+        finally:
+            LOCK.release()
 
 
 def q(sql: str, params: Iterable[Any] = ()) -> list[dict]:
-    return [dict(r) for r in get_conn().execute(sql, tuple(params)).fetchall()]
+    with LOCK:
+        return [dict(r) for r in get_conn().execute(sql, tuple(params)).fetchall()]
 
 
 def q1(sql: str, params: Iterable[Any] = ()) -> dict | None:
-    r = get_conn().execute(sql, tuple(params)).fetchone()
+    with LOCK:
+        r = get_conn().execute(sql, tuple(params)).fetchone()
     return dict(r) if r else None
 
 
 def execute(sql: str, params: Iterable[Any] = ()) -> int:
-    cur = get_conn().execute(sql, tuple(params))
-    return cur.rowcount
+    with LOCK:
+        return get_conn().execute(sql, tuple(params)).rowcount
 
 
 def insert(table: str, row: dict[str, Any], conn: sqlite3.Connection | None = None, or_ignore: bool = False) -> int:
     cols = list(row.keys())
     sql = f"INSERT {'OR IGNORE ' if or_ignore else ''}INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})"
-    cur = (conn or get_conn()).execute(sql, tuple(row[c] for c in cols))
-    return cur.rowcount
+    with LOCK:
+        return (conn or get_conn()).execute(sql, tuple(row[c] for c in cols)).rowcount
 
 
 def update(table: str, key: str, key_value: Any, fields: dict[str, Any], conn: sqlite3.Connection | None = None) -> int:
     if not fields:
         return 0
     sets = ", ".join(f"{k} = ?" for k in fields)
-    cur = (conn or get_conn()).execute(f"UPDATE {table} SET {sets} WHERE {key} = ?", (*fields.values(), key_value))
-    return cur.rowcount
+    with LOCK:
+        return (conn or get_conn()).execute(f"UPDATE {table} SET {sets} WHERE {key} = ?", (*fields.values(), key_value)).rowcount
 
 
 def backup(dest: Path) -> Path:
@@ -150,7 +207,12 @@ def backup(dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     target = sqlite3.connect(str(dest))
     try:
-        get_conn().backup(target)
+        with LOCK:
+            get_conn().backup(target)
     finally:
         target.close()
     return dest
+
+
+def sqlite_version() -> str:
+    return sqlite3.sqlite_version

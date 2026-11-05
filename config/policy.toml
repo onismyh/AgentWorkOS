@@ -1,0 +1,34 @@
+# Autonomy & permission policy (committed). Machine overrides: config/local.toml under [policy.*].
+
+[levels]
+# Highest autonomy level the AI may take per category. Things that must ultimately be said/sent by the
+# human (comms, admin forms, career applications, scheduling with other people) stop at L4: the AI prepares
+# everything, the human sends/submits through the Outbox.
+max_by_category = { dev = 5, research = 5, writing = 4, doc = 5, data = 5, pm = 5, schedule = 4, comms = 4, admin = 4, career = 4, learning = 5, system = 5, other = 4 }
+# Kinds that never autostart without the human (decisions are surfaced, not taken).
+no_autostart_kinds = ["decision"]
+
+[sandbox]
+# Executor sandbox per effective level.
+by_level = { "1" = "read-only", "2" = "read-only", "3" = "workspace-write", "4" = "workspace-write", "5" = "workspace-write" }
+
+[permissions]
+# Directories agents may READ (passed as add_dirs). Writes always go to the task workspace first.
+readable_roots = ["D:/papers", "D:/phd", "D:/transfer", "D:/personal"]
+# L5 tasks may apply deliverables into these directories without approval (empty = always ask).
+auto_apply_roots = []
+# Never read/write these (secrets, credentials, other apps' private stores).
+deny_globs = ["**/.ssh/**", "**/.codex/auth.json", "**/.claude/.credentials.json", "**/.claude/settings.json",
+              "**/secrets.toml", "**/*.pem", "**/*.key", "**/WeChat Files/**", "**/xwechat_files/**"]
+
+[actions]
+# Action types that always need human approval regardless of level (mirrors models.SENSITIVE_ACTIONS).
+always_approve = ["send_email", "post_message", "publish", "git_push", "calendar_write", "notion_write", "delete",
+                  "spend", "apply_to_project", "submit_form", "other"]
+# Approvals expire after this many hours (then the task is handed back to the human).
+expiry_hours = { low = 72, medium = 72, high = 48 }
+
+[verify]
+# Levels whose results get an independent verification pass by a second executor before delivery.
+levels = [5]
+min_score = 7

@@ -3,17 +3,21 @@ from __future__ import annotations
 
 import importlib
 import logging
+import threading
 from datetime import datetime, timedelta
 
 from .. import repo
 from ..config import load_config
 from ..db import utcnow
+from ..timeutil import in_window
 from .base import Sensor, SensorContext, SignalDraft  # noqa: F401
 
 log = logging.getLogger("awos.sensors")
 
-BUILTIN = ("git", "files", "agent_history", "zotero", "inbox_drop", "gmail", "notion")
+BUILTIN = ("git", "files", "agent_history", "zotero", "inbox_drop", "mailmaster", "gmail", "notion")
 _REGISTRY: dict[str, Sensor] = {}
+_RUNNING: dict[str, threading.Lock] = {}
+_RUNNING_GUARD = threading.Lock()
 
 
 def register(sensor: Sensor) -> None:
@@ -49,11 +53,7 @@ def get_sensor(name: str) -> Sensor:
 
 def _in_active_hours(cfg: dict) -> bool:
     hours = cfg.get("active_hours")
-    if not hours:
-        return True
-    now = datetime.now().strftime("%H:%M")
-    start, end = hours
-    return start <= now <= end if start <= end else (now >= start or now <= end)
+    return True if not hours else in_window(hours)
 
 
 def is_due(name: str) -> bool:
@@ -71,6 +71,17 @@ def is_due(name: str) -> bool:
 
 def run_sensor(name: str, force: bool = False) -> dict:
     """Collect from one sensor, persist new signals, update its state. Returns a summary dict."""
+    with _RUNNING_GUARD:
+        lock = _RUNNING.setdefault(name, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return {"sensor": name, "ok": False, "error": "already running", "new": 0}
+    try:
+        return _run_sensor(name)
+    finally:
+        lock.release()
+
+
+def _run_sensor(name: str) -> dict:
     sensor = get_sensor(name)
     cfg = load_config().get(f"sensors.{name}", {}) or {}
     st = repo.sensor_state(name)

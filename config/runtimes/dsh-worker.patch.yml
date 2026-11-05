@@ -1,0 +1,5 @@
+# DSH overlay used by AgentWorkOS headless runs (passed with --patch).
+# Never upload session logs; model/provider rows are appended by the adapter from var/secrets.toml.
+- id: session-log-deepseek
+  config:
+    enabled: false

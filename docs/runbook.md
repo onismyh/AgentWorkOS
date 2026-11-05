@@ -1,0 +1,194 @@
+# AgentWorkOS 运维手册（Runbook）
+
+> 适用：Windows 10/11，当前用户登录时在后台运行。仓库路径含空格和中文（`D:\phd\AgentWorkOS`），下文所有命令都已按这种路径测试过。
+> 约定：`<root>` = 仓库根目录；PowerShell 命令在 `<root>` 下执行。
+
+## 1. 新机器安装
+
+前置：git、[uv](https://docs.astral.sh/uv/)（没有 uv 时 `install.ps1` 会打印安装命令后退出）、能访问 PyPI / nodejs.org（本机走系统代理 `127.0.0.1:7890`）。
+
+```powershell
+git clone <repo-url> AgentWorkOS
+cd AgentWorkOS
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1            # 可重复执行
+# 可选开关：-RegisterService（顺带注册计划任务）  -AddToPath（把 scripts\ 加入用户 PATH，之后可直接敲 awos）
+#           -SkipNode  -ForceNode（删掉 runtime\node 重新下载）  -NodeMajor 24  -Proxy http://127.0.0.1:7890
+```
+
+`install.ps1` 依次完成以下步骤，每一步都是幂等的：
+
+1. 检查 `uv`。
+2. 如果 `.venv` 不存在，执行 `uv venv --python 3.13` 创建；已经存在则保留（如果版本不是 3.13，只给出警告）。
+3. 执行 `uv pip install -e .[dev]`。
+4. 创建 `var\` 下的各个子目录：workspaces、artifacts、logs、runs、backups、context、inbox-drop。
+5. 如果 `runtime\node\node.exe` 不存在，下载**便携 Node.js v24 LTS**（win-x64 zip）。版本从 `https://nodejs.org/dist/index.json` 解析，按 `SHASUMS256.txt` 校验 SHA256 后再解压。**不改动系统 Node**（本机 `E:\nodejs` v22.17）。下载走 Windows 系统（IE）代理，也可以用 `-Proxy` 指定。
+
+迁移旧数据：把旧机器的 `var\` 整个拷过来（见 §6），然后注册服务（§2）。
+
+CLI 用法：`scripts\awos.cmd <子命令>`，例如 `status`、`inbox`、`approve <id> [option]`、`doctor`、`backup`。也可以加 `-AddToPath`，之后直接敲 `awos ...`。启动器只从 `%~dp0` 推导路径，并临时切换到 `chcp 65001`，退出时恢复原来的代码页。
+
+## 2. 后台服务（计划任务）注册 / 注销
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\service-install.ps1 -DryRun   # 只打印，不改动（-WhatIf 同义）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\service-install.ps1           # 注册并立即启动 Daemon
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\service-uninstall.ps1         # 先注销 Watchdog → awos stop → 再注销 Daemon
+```
+
+| 任务 | 触发 | 动作 | 关键设置 |
+|---|---|---|---|
+| `\AgentWorkOS\Daemon` | 当前用户登录（延迟 30 秒）；注册后立即启动 | `.venv\Scripts\pythonw.exe -X utf8 -m awos.cli daemon`，工作目录 `<root>` | 无执行时限；失败后每 1 分钟重启（最多 999 次）；`IgnoreNew`；允许用电池运行，切换到电池不停止 |
+| `\AgentWorkOS\Watchdog` | 每 10 分钟一次，无限重复 | `pythonw.exe -X utf8 -m awos.cli ensure-running` | 时限 5 分钟；`IgnoreNew` |
+
+- 两个任务都以**当前用户、仅登录时（Interactive）、非提权**运行。`pythonw` 不弹窗口。任务设置了 Hidden，在任务计划程序 GUI 中要勾选"查看 → 显示隐藏的任务"才能看到。
+- 注册时如果报 `Access is denied (0x80070005)`，在**管理员** PowerShell 里执行一次即可（任务本身仍然以你的身份、非提权运行）。
+- 重新执行 `service-install.ps1` 会覆盖原有定义（`-Force`），可用来更新。
+- 临时暂停：`awos stop` 只能停掉当前进程，Watchdog 会在 10 分钟内把它重新拉起来。要真正暂停：
+
+  ```powershell
+  Disable-ScheduledTask -TaskPath '\AgentWorkOS\' -TaskName Watchdog; scripts\awos.cmd stop
+  # 恢复：
+  Enable-ScheduledTask -TaskPath '\AgentWorkOS\' -TaskName Watchdog; Start-ScheduledTask -TaskPath '\AgentWorkOS\' -TaskName Daemon
+  ```
+
+- 查看状态：`scripts\awos.cmd status`；`Get-ScheduledTask -TaskPath '\AgentWorkOS\' | Get-ScheduledTaskInfo`（`LastTaskResult=0` 表示正常）。
+- **健康检查不要用 `Invoke-WebRequest`**：本机系统代理不会绕过 127.0.0.1，PS 5.1 的请求会被发往代理而失败。改用 `scripts\awos.cmd status`，或者 `curl.exe --noproxy "*" http://127.0.0.1:8765/`。
+
+## 3. 日志和数据在哪里
+
+| 内容 | 位置 |
+|---|---|
+| 状态库（唯一状态源，WAL） | `var\awos.db`（另有 `awos.db-wal` 和 `awos.db-shm`） |
+| daemon 日志（5 MB × 5 轮转） | `var\logs\daemon.log` |
+| 每次 Agent 运行的 prompt / 原始输出 / 结果 | `var\runs\<run_id>\` |
+| 任务隔离工作区 / 交付物 | `var\workspaces\<task_id>\`、`var\artifacts\` |
+| 自动备份（每天一份，保留 14 份） | `var\backups\awos-YYYY-MM-DD.db`；手动备份用 `awos backup` |
+| 个人上下文 | `var\context\profile.md` |
+| 单实例锁 / 停止信号 | `var\daemon.lock`、`var\daemon.stop` |
+| 密钥（都在 gitignore 中） | `var\secrets.toml`（推送通道）、`var\link_key`（审批链接 HMAC 密钥，首次使用时自动生成）、`var\api_token` |
+| 便携 Node | `runtime\node\` |
+| 通知记录 | `notifications` 表（Dashboard，或 `sqlite3 var\awos.db "select created_at,channel,status,error,title from notifications order by created_at desc limit 20"`） |
+| 计划任务历史 | 事件查看器 → Microsoft-Windows-TaskScheduler/Operational（需要先启用"所有任务历史记录"） |
+
+建议给 `var\` 收紧权限。D 盘根目录默认允许 Authenticated Users 修改，同机的其他账户可能读到密钥：
+
+```powershell
+icacls var /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
+```
+
+## 4. 通知通道
+
+### 4.1 行为
+
+- **默认通道是 Windows 原生 Toast**：PowerShell 5.1 + WinRT，不用安装任何东西。所有在 `var\secrets.toml` 的 `[notify]` 段里填了密钥的手机通道会**自动启用**。
+- **静默时段**：`scheduler.quiet_hours`，按北京时间计算，默认 01:30–09:30，可以跨午夜。这段时间只推送 `level="high"` 的通知，其余记为 `suppressed`。
+- **去重**：同一个 `title + ref_id` 在 30 分钟内只发一次。失败的发送不计入去重，下次会重试。
+- **隐私**：云端通道（企业微信、飞书、Server酱等）只收到标题和不超过 200 字的摘要（`notify.phone_body_chars`），完整内容只留在本机 Dashboard。错误信息入库前会抹掉密钥。
+- **相关配置**：写在 `config\local.toml` 的 `[notify]` 段：
+  - `disabled_channels = ["pushplus"]`：禁用某个已配置的通道。
+  - `webhook_min_level = "action"`：info 级通知只走 Toast，不推到手机。
+  - `toast_app_id = "..."`：已注册品牌 AUMID 时使用。
+- **改完 `secrets.toml` 不需要重启**：每次发送都会重新读取。
+- **链接**：通知里的链接指向 `http://127.0.0.1:8765/...`，**只能在这台电脑上打开**。手机上看到的是提醒，审批请回到电脑上处理（或等以后接入 IM 卡片回调）。
+
+### 4.2 配置手机推送（`var\secrets.toml`，示例全部是占位符）
+
+```toml
+# var/secrets.toml —— 已在 gitignore 中，绝不要提交；只填你需要的通道
+[notify]
+# 企业微信群机器人（推荐）：企业微信 → 建一个只有自己的内部群 → 群设置 → 添加群机器人 → 复制 Webhook 地址。每个机器人每分钟最多 20 条
+wecom_webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR-WECOM-ROBOT-KEY"
+
+# 飞书自定义机器人：群设置 → 群机器人 → 添加机器人 → 自定义机器人；建议开启"签名校验"，并把密钥填到 feishu_secret
+feishu_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR-HOOK-ID"
+feishu_secret  = "YOUR-FEISHU-SIGN-SECRET"     # 可选
+
+# Server酱 Turbo：sct.ftqq.com 微信扫码 → SendKey（SCT 开头）。免费版每天 5 条；Server酱³ 的 sctp 开头密钥也支持
+serverchan_key = "SCTxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Bark（仅 iPhone）：在 App 首页复制形如 https://api.day.app/<device_key> 的地址
+bark_url = "https://api.day.app/YOUR-DEVICE-KEY"
+
+# ntfy：手机 App 订阅一个难猜的 topic（国内可达性不稳定，不推荐作为主通道）
+ntfy_url   = "https://ntfy.sh/awos-CHANGE-ME-random-topic"
+ntfy_token = ""                                # 可选：自建服务或保留 topic 时使用
+
+# PushPlus（需要实名认证）
+pushplus_token = "YOUR-PUSHPLUS-TOKEN"
+
+# 发邮件给自己（可选，适合收摘要）：163 授权码，或学校邮箱的客户端专用密码
+smtp_host     = "smtp.163.com"
+smtp_port     = 465                            # 465 = SSL；587 = STARTTLS
+smtp_user     = "you@163.com"
+smtp_password = "YOUR-SMTP-AUTH-CODE"
+smtp_to       = "you@163.com"                  # 默认等于 smtp_user
+```
+
+测试某个通道（会真的发出一条消息）：
+
+```powershell
+.venv\Scripts\python.exe -X utf8 -c "from awos.hitl.notify import notify; print(notify('AgentWorkOS 测试', '手机推送测试', level='action', channels=['wecom'], dedupe=False))"
+```
+
+然后查看 `notifications` 表里这一行的 `status` 和 `error`（§3）。
+
+### 4.3 审批链接（`hitl/tokens.py`）
+
+- 链接格式为 `http://127.0.0.1:<port>/approve/<token>`，用 HMAC-SHA256 签名，密钥是 `var\link_key`。数据库里只保存 `sha256(token)`。
+- 每个审批**同一时间只有一个有效链接**，重新签发会让旧链接作废。审批一旦被处理、过期、取消，或者 payload 发生变化，链接立即失效。
+- 有效期默认 24 小时，并且不会超过审批本身的 `expires_at`。
+- 删除 `var\link_key` 等于轮换密钥，所有未使用的链接都会失效。
+
+## 5. Toast 不显示怎么排查
+
+当前方案使用的 AppUserModelID 是 Windows PowerShell 自带的 `{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`。这个 ID 在系统里默认就存在，所以零配置。代价是通知的来源会显示为 **"Windows PowerShell"**，正文底部带 "AgentWorkOS" 署名。
+
+1. **看记录**：在 `notifications` 表里找 `channel='toast'` 的行。
+   - `suppressed` + `quiet hours`：当前处于静默时段，属于正常行为。
+   - `suppressed` + `AWOS_NOTIFY_DISABLE`：环境变量关闭了通知。
+   - `failed` + `toasts disabled: DisabledForApplication/DisabledForUser`：在系统设置中被关闭了，见下一步。
+   - `failed` + `timed out`：PowerShell 20 秒没有返回，通常是机器太忙或杀毒软件拦截。
+   - 没有记录：可能被 30 分钟去重跳过了，或者调用方根本没有调用 notify。
+2. **系统设置**：设置 → 系统 → 通知和操作 → 打开"获取来自应用和其他发送者的通知"，并确认列表里的 **Windows PowerShell** 是开启的。
+3. **专注助手 / 勿扰**：只会隐藏弹窗，通知仍然在操作中心（Win+A）里。
+4. **会话**：任务以 Interactive 方式运行，所以必须有用户登录。如果被改成"不管用户是否登录都运行"，或者以 SYSTEM 身份运行，Toast 不会显示。
+5. **直接诊断**（PowerShell 5.1；PowerShell 7 不支持这种 WinRT 写法）：
+
+   ```powershell
+   [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+   $id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+   [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Setting      # 期望 Enabled
+   @([Windows.UI.Notifications.ToastNotificationManager]::History.GetHistory($id)).Count      # 操作中心里的条数
+   ```
+
+6. **端到端测试**（会弹出一条通知）：
+
+   ```powershell
+   .venv\Scripts\python.exe -X utf8 -c "from awos.hitl.notify import notify, dashboard_url; print(notify('AgentWorkOS 测试通知', '点按钮打开控制台', level='action', url=dashboard_url(), channels=['toast'], dedupe=False))"
+   ```
+
+7. 点击通知或按钮会打开浏览器访问 `http://127.0.0.1:8765/`，如果打不开，说明 daemon 没在运行（`awos status`）。
+8. 想要显示"AgentWorkOS"品牌名：需要一个带 `System.AppUserModel.ID` 属性的开始菜单快捷方式（目前未实现）。实现后，在 `config\local.toml` 中设置 `[notify] toast_app_id = "AgentWorkOS"`。在没有完成注册之前**不要**设置这一项，否则 Toast 会静默失败。
+
+## 6. 备份与恢复 `var\`
+
+**自动备份**：daemon 每天用 SQLite 在线备份 API 生成 `var\backups\awos-YYYY-MM-DD.db`，保留 14 份。随时可以执行 `scripts\awos.cmd backup` 手动备份一次。
+
+**完整备份**（例如迁移前）：
+
+```powershell
+Disable-ScheduledTask -TaskPath '\AgentWorkOS\' -TaskName Watchdog; scripts\awos.cmd stop    # 停掉 daemon，保证一致性
+robocopy var D:\Backup\AgentWorkOS-var /MIR /XD workspaces /R:1 /W:1   # workspaces 可再生成，按需排除
+Enable-ScheduledTask -TaskPath '\AgentWorkOS\' -TaskName Watchdog; Start-ScheduledTask -TaskPath '\AgentWorkOS\' -TaskName Daemon
+```
+
+- daemon 运行时**不要**只复制 `awos.db`：WAL 里可能还有没合并的数据。在线备份请用 `awos backup`。
+- `secrets.toml`、`link_key`、`api_token` 都是敏感文件，备份的存放位置也要保密。
+
+**恢复**：
+
+1. 停止 daemon（Disable Watchdog + `awos stop`，或者执行 `service-uninstall.ps1`）。
+2. 整体还原：把备份目录拷回 `<root>\var`。
+   只还原数据库：把 `var\backups\awos-YYYY-MM-DD.db` 复制为 `var\awos.db`，并且**删除旧的 `var\awos.db-wal` 和 `var\awos.db-shm`**（它们属于被替换的那个库，留着会损坏数据）。
+3. 启动：`Enable-ScheduledTask ... Watchdog` + `Start-ScheduledTask ... Daemon`（或执行 `service-install.ps1`），然后用 `awos status` / `awos doctor` 检查。
+4. 恢复到旧库之后，旧库中仍为 pending 的审批会重新出现。之前发出的审批链接如果对不上 `token_hash`，会自动失效，在 Dashboard 里重新处理即可。

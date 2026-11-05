@@ -1,6 +1,8 @@
 # AgentWorkOS default configuration (committed; NO secrets here).
 # Machine-specific overrides go to config/local.toml (gitignored). Secrets go to var/secrets.toml (gitignored).
 
+timezone = "Asia/Shanghai"           # system clock is UTC-4; all wall-clock logic uses this zone
+
 [server]
 host = "127.0.0.1"          # localhost only by default
 port = 8765
@@ -21,7 +23,7 @@ node_runtime = "runtime/node"          # portable Node >= 22.19 for pi / dsh
 tick_seconds = 15
 lease_seconds = 300                    # task lease; heartbeat renews it
 max_concurrent_runs = 3
-quiet_hours = ["23:30", "07:30"]       # no notifications (except risk=high) in this window
+quiet_hours = ["01:30", "09:30"]       # Beijing time; user works ~12:00-24:00. Only risk=high notifies here
 autostart_max_level = 5                # tasks up to this level start automatically after triage
 autostart_min_priority = 3             # P0..P3 all eligible
 retry_backoff_seconds = [60, 300, 1800]
@@ -83,6 +85,9 @@ interval_minutes = 60
 roots = ["D:/papers", "D:/phd", "D:/transfer", "D:/personal"]
 max_depth = 4
 stale_dirty_hours = 48                 # uncommitted changes older than this become a signal
+stale_unpushed_hours = 24              # unpushed commits older than this become a signal
+recent_days = 14                       # "recent activity" window (no-remote backup-risk check, context snapshot)
+exclude = []                           # extra absolute paths to skip (AgentWorkOS var/external/runtime always skipped)
 
 [sensors.files]
 enabled = true
@@ -91,30 +96,48 @@ roots = ["D:/papers", "D:/phd", "D:/transfer"]
 extensions = [".docx", ".doc", ".pptx", ".xlsx", ".pdf", ".md", ".tex", ".txt"]
 lookback_days = 7
 max_depth = 5
+group_depth = 1                        # project folder = <root>/<first-level folder>
+deadline_ahead_days = 60               # dates in file names this far ahead count as deadline hints
+exclude = []
 
 [sensors.agent_history]
 enabled = true
 interval_minutes = 120
 lookback_days = 7
+signal_days = 2                        # emit (project, day) signals for today + yesterday; older days -> context only
 
 [sensors.zotero]
 enabled = true
 interval_minutes = 360
+data_dir = "D:/zotero"                 # sqlite fallback only; local API on 127.0.0.1:23119 is preferred
+lookback_days = 7                      # first-run window
 
 [sensors.inbox_drop]
 enabled = true
 interval_minutes = 1
 
+[sensors.mailmaster]
+enabled = true
+interval_minutes = 30
+root = "D:/MailMasterData"             # NetEase Mail Master local store (plain SQLite, read-only)
+lookback_days = 3
+active_hours = ["09:00", "01:30"]
+
 [sensors.gmail]
 enabled = true
 interval_minutes = 180
-active_hours = ["08:00", "23:00"]
+active_hours = ["09:00", "01:30"]
 lookback_hours = 24
+min_importance = 3                     # items with action=none and no deadline need at least this importance
+timeout_s = 600
 
 [sensors.notion]
 enabled = true
 interval_minutes = 180
-active_hours = ["08:00", "23:00"]
+active_hours = ["09:00", "01:30"]
+recent_days = 3
+ahead_days = 14
+timeout_s = 600
 
 [sensors.gcal]
 enabled = false                        # Google Calendar is empty for this user; Notion holds the schedule
@@ -124,4 +147,4 @@ refresh_hours = 24
 
 [notify]
 channels = ["toast"]                   # toast | webhook (configure var/secrets.toml)
-digest_times = ["08:40", "21:30"]
+digest_times = ["10:30", "22:30"]       # Beijing time

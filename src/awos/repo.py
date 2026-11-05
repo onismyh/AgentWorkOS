@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from . import db
 from .db import dumps, loads, new_id, q, q1, tx, utcnow
+from .timeutil import local_today
 from .models import TERMINAL, TRANSITIONS, ApprovalStatus, RunStatus, TaskStatus
 
 # --------------------------------------------------------------------------- events / audit
@@ -16,11 +16,12 @@ from .models import TERMINAL, TRANSITIONS, ApprovalStatus, RunStatus, TaskStatus
 def log_event(entity_type: str, entity_id: str | None, type_: str, data: Any = None, actor: str = "system", conn=None) -> None:
     db.insert("events", {"ts": utcnow(), "entity_type": entity_type, "entity_id": entity_id,
                          "type": type_, "actor": actor, "data": dumps(data)}, conn=conn)
-    try:
+
+    def _publish() -> None:
         from .bus import bus
         bus.publish({"entity_type": entity_type, "entity_id": entity_id, "type": type_, "actor": actor})
-    except Exception:  # pragma: no cover - bus is best effort
-        pass
+
+    db.after_commit(_publish)  # never announce a change that may still roll back
 
 
 def list_events(entity_type: str | None = None, entity_id: str | None = None, limit: int = 200, before_id: int | None = None) -> list[dict]:
@@ -93,17 +94,17 @@ def create_task(title: str, *, description: str | None = None, kind: str = "todo
                 due_at: str | None = None, source: str = "manual", source_signal_id: str | None = None,
                 dedupe_key: str | None = None, acceptance: str | None = None, meta: Any = None,
                 max_attempts: int = 3, actor: str = "system") -> str:
-    if dedupe_key:
-        existing = q1("SELECT id FROM tasks WHERE dedupe_key = ?", (dedupe_key,))
-        if existing:
-            return existing["id"]
     tid = new_id("tsk")
-    root_id = tid
-    if parent_id:
-        parent = q1("SELECT root_id FROM tasks WHERE id = ?", (parent_id,))
-        root_id = (parent or {}).get("root_id") or parent_id
     now = utcnow()
     with tx() as c:
+        if dedupe_key:
+            existing = c.execute("SELECT id FROM tasks WHERE dedupe_key = ?", (dedupe_key,)).fetchone()
+            if existing:
+                return existing["id"]
+        root_id = tid
+        if parent_id:
+            parent = c.execute("SELECT root_id FROM tasks WHERE id = ?", (parent_id,)).fetchone()
+            root_id = (parent["root_id"] if parent else None) or parent_id
         db.insert("tasks", {
             "id": tid, "parent_id": parent_id, "root_id": root_id, "title": title[:300], "description": description,
             "kind": kind, "category": category, "priority": int(priority), "level": max(1, min(5, int(level))),
@@ -141,27 +142,40 @@ class InvalidTransition(Exception):
     pass
 
 
+class LeaseLost(Exception):
+    """Raised when a worker tries to commit a result for a task it no longer owns (fencing)."""
+
+
+PROTECTED_TASK_FIELDS = {"status", "lease_owner", "lease_expires_at", "attempts", "id", "created_at"}
+
+
 def set_task_status(task_id: str, status: str, reason: str | None = None, *, actor: str = "system",
-                    force: bool = False, extra: dict[str, Any] | None = None, conn=None) -> dict:
-    """Transition a task; validates against models.TRANSITIONS and records an event."""
+                    force: bool = False, extra: dict[str, Any] | None = None, conn=None,
+                    expect_owner: str | None = None) -> dict:
+    """Transition a task; validates against models.TRANSITIONS and records an event.
+    expect_owner: fencing token - only succeed while the task is still RUNNING under this lease owner."""
     def _do(c):
-        row = c.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = c.execute("SELECT status, lease_owner FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise KeyError(task_id)
+        if expect_owner is not None and (row["status"] != TaskStatus.RUNNING or row["lease_owner"] != expect_owner):
+            raise LeaseLost(f"{task_id}: owned by {row['lease_owner']} in {row['status']}, not {expect_owner}")
         old = TaskStatus(row["status"])
         new = TaskStatus(status)
         if old != new and not force and new not in TRANSITIONS.get(old, set()):
             raise InvalidTransition(f"{task_id}: {old} -> {new} not allowed")
-        fields: dict[str, Any] = {"status": str(new), "status_reason": reason, "updated_at": utcnow()}
+        fields: dict[str, Any] = {k: (dumps(v) if k in TASK_JSON else v) for k, v in (extra or {}).items()
+                                  if k not in PROTECTED_TASK_FIELDS}
+        fields.update({"status": str(new), "status_reason": reason, "updated_at": utcnow()})
         if new == TaskStatus.RUNNING:
             fields["started_at"] = utcnow()
         if new in TERMINAL or new in (TaskStatus.REVIEW, TaskStatus.WAITING_USER):
             fields["finished_at"] = utcnow()
+        elif new in (TaskStatus.READY, TaskStatus.INBOX, TaskStatus.TRIAGED):
+            fields["finished_at"] = None
         if new != TaskStatus.RUNNING:
             fields["lease_owner"] = None
             fields["lease_expires_at"] = None
-        if extra:
-            fields.update({k: (dumps(v) if k in TASK_JSON else v) for k, v in extra.items()})
         db.update("tasks", "id", task_id, fields, conn=c)
         log_event("task", task_id, "status_changed", {"from": str(old), "to": str(new), "reason": reason}, actor=actor, conn=c)
         return {"from": str(old), "to": str(new)}
@@ -173,6 +187,9 @@ def set_task_status(task_id: str, status: str, reason: str | None = None, *, act
 
 
 def update_task(task_id: str, actor: str = "system", **fields: Any) -> None:
+    bad = set(fields) & PROTECTED_TASK_FIELDS
+    if bad:
+        raise ValueError(f"use set_task_status/claim for {sorted(bad)}")
     if not fields:
         return
     fields = {k: (dumps(v) if k in TASK_JSON else v) for k, v in fields.items()}
@@ -184,14 +201,22 @@ def update_task(task_id: str, actor: str = "system", **fields: Any) -> None:
 
 
 def merge_task_meta(task_id: str, **items: Any) -> dict:
-    t = get_task(task_id) or {}
-    meta = t.get("meta") or {}
-    meta.update(items)
-    db.update("tasks", "id", task_id, {"meta": dumps(meta), "updated_at": utcnow()})
+    """Atomic read-modify-write of tasks.meta (keys whose value is None are removed)."""
+    with tx() as c:
+        row = c.execute("SELECT meta FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        meta = loads(row["meta"], {}) if row else {}
+        for k, v in items.items():
+            if v is None:
+                meta.pop(k, None)
+            else:
+                meta[k] = v
+        db.update("tasks", "id", task_id, {"meta": dumps(meta), "updated_at": utcnow()}, conn=c)
     return meta
 
 
 def add_dependency(task_id: str, depends_on: str) -> None:
+    if task_id == depends_on:
+        return
     db.insert("task_deps", {"task_id": task_id, "depends_on": depends_on}, or_ignore=True)
 
 
@@ -210,10 +235,11 @@ def claim_next_task(owner: str, lease_seconds: int, executor_ok=None) -> dict | 
         rows = c.execute(
             """SELECT * FROM tasks t
                WHERE t.status = 'ready'
+                 AND t.attempts < t.max_attempts
                  AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= ?)
                  AND NOT EXISTS (SELECT 1 FROM task_deps d JOIN tasks u ON u.id = d.depends_on
-                                 WHERE d.task_id = t.id AND u.status NOT IN ('done'))
-               ORDER BY t.priority ASC, t.created_at ASC LIMIT 20""", (now,)).fetchall()
+                                 WHERE d.task_id = t.id AND u.status NOT IN ('done','review','waiting_user','failed','cancelled','dismissed'))
+               ORDER BY t.priority ASC, t.created_at ASC LIMIT 200""", (now,)).fetchall()
         for r in rows:
             row = dict(r)
             if executor_ok and not executor_ok(row):
@@ -293,13 +319,13 @@ def recent_tool_calls(limit: int = 300) -> list[dict]:
 
 
 def record_cost(run_id: str | None, executor: str, model: str | None, cost_usd: float, tokens_in: int = 0, tokens_out: int = 0) -> None:
-    db.insert("cost_ledger", {"ts": utcnow(), "day": datetime.now().strftime("%Y-%m-%d"), "run_id": run_id,
+    db.insert("cost_ledger", {"ts": utcnow(), "day": local_today().isoformat(), "run_id": run_id,
                               "executor": executor, "model": model, "cost_usd": cost_usd or 0,
                               "tokens_in": tokens_in or 0, "tokens_out": tokens_out or 0})
 
 
 def cost_today(executor: str | None = None) -> dict:
-    day = datetime.now().strftime("%Y-%m-%d")
+    day = local_today().isoformat()
     if executor:
         r = q1("SELECT COALESCE(SUM(cost_usd),0) usd, COUNT(*) runs, COALESCE(SUM(tokens_in+tokens_out),0) tokens "
                "FROM cost_ledger WHERE day = ? AND executor = ?", (day, executor))
@@ -312,6 +338,7 @@ def cost_today(executor: str | None = None) -> dict:
 # --------------------------------------------------------------------------- approvals (Outbox)
 
 APPROVAL_JSON = ("options", "payload", "result")
+REJECT_KEYS = {"reject", "no", "cancel", "defer", "stop"}
 
 
 def create_approval(*, title: str, kind: str, options: list[dict], task_id: str | None = None, run_id: str | None = None,
@@ -356,10 +383,15 @@ def decide_approval(approval_id: str, decision: str, *, note: str | None = None,
         row = dict(row)
         if row["status"] != ApprovalStatus.PENDING:
             raise ValueError(f"approval {approval_id} is {row['status']}, not pending")
-        keys = [o.get("key") for o in (loads(row["options"], []) or [])]
+        if row.get("expires_at") and row["expires_at"] < utcnow() and via != "auto":
+            raise ValueError(f"approval {approval_id} expired at {row['expires_at']}")
+        options = loads(row["options"], []) or []
+        keys = [o.get("key") for o in options]
         if decision not in keys:
             raise ValueError(f"unknown option {decision!r}; expected one of {keys}")
-        status = ApprovalStatus.REJECTED if decision in ("reject", "no", "cancel") else ApprovalStatus.APPROVED
+        effect = next((o.get("effect") for o in options if o.get("key") == decision), None)
+        rejected = effect == "reject" or (effect is None and decision in REJECT_KEYS)
+        status = ApprovalStatus.REJECTED if rejected else ApprovalStatus.APPROVED
         db.update("approvals", "id", approval_id, {"status": status, "decision": decision, "decision_note": note,
                                                    "decided_via": via, "decided_at": utcnow()}, conn=c)
         log_event("approval", approval_id, "decided", {"decision": decision, "status": str(status), "via": via,
@@ -391,7 +423,11 @@ def add_artifact(title: str, *, kind: str = "file", path: str | Path | None = No
     aid = new_id("art")
     sha, size = None, None
     if path:
-        p = Path(path)
+        from .config import load_config
+        p = Path(path).resolve()
+        var = load_config().path("var").resolve()
+        if var not in p.parents:
+            raise ValueError(f"artifact path must be inside {var}: {p}")
         if p.is_file():
             size = p.stat().st_size
             h = hashlib.sha256()
@@ -460,27 +496,31 @@ def list_notifications(limit: int = 100) -> list[dict]:
 
 def upsert_fact(kind: str, key: str, value: str, *, source: str | None = None, confidence: float = 0.6,
                 status: str = "active", actor: str = "system", pinned: bool | None = None) -> str | None:
-    """Insert/update a context fact. Agent writes never overwrite pinned (user-confirmed) facts."""
+    """Insert/update a context fact atomically. Agent writes never overwrite pinned (user-confirmed) facts."""
     now = utcnow()
-    existing = q1("SELECT * FROM context_facts WHERE kind = ? AND key = ?", (kind, key))
-    if existing:
-        if existing["pinned"] and actor != "user":
-            return None
-        if existing["value"] == value and existing["status"] == status and pinned is None:
+    with tx() as c:
+        row = c.execute("SELECT * FROM context_facts WHERE kind = ? AND key = ?", (kind, key)).fetchone()
+        existing = dict(row) if row else None
+        if existing:
+            if existing["pinned"] and actor != "user":
+                return None
+            if existing["value"] == value and existing["status"] == status and pinned is None:
+                return existing["id"]
+            fields: dict[str, Any] = {"value": value, "source": source, "confidence": confidence, "status": status,
+                                      "updated_at": now}
+            if pinned is not None:
+                fields["pinned"] = 1 if pinned else 0
+            db.update("context_facts", "id", existing["id"], fields, conn=c)
+            log_event("context", existing["id"], "updated", {"kind": kind, "key": key, "old": existing["value"][:300],
+                                                             "new": value[:300], "source": source}, actor=actor, conn=c)
             return existing["id"]
-        fields: dict[str, Any] = {"value": value, "source": source, "confidence": confidence, "status": status, "updated_at": now}
-        if pinned is not None:
-            fields["pinned"] = 1 if pinned else 0
-        db.update("context_facts", "id", existing["id"], fields)
-        log_event("context", existing["id"], "updated", {"kind": kind, "key": key, "old": existing["value"][:300],
-                                                         "new": value[:300], "source": source}, actor=actor)
-        return existing["id"]
-    fid = new_id("ctx")
-    db.insert("context_facts", {"id": fid, "kind": kind, "key": key, "value": value, "source": source,
-                                "confidence": confidence, "status": status, "pinned": 1 if pinned else 0,
-                                "created_at": now, "updated_at": now})
-    log_event("context", fid, "created", {"kind": kind, "key": key, "value": value[:300], "source": source}, actor=actor)
-    return fid
+        fid = new_id("ctx")
+        db.insert("context_facts", {"id": fid, "kind": kind, "key": key, "value": value, "source": source,
+                                    "confidence": confidence, "status": status, "pinned": 1 if pinned else 0,
+                                    "created_at": now, "updated_at": now}, conn=c)
+        log_event("context", fid, "created", {"kind": kind, "key": key, "value": value[:300], "source": source},
+                  actor=actor, conn=c)
+        return fid
 
 
 def list_facts(kind: str | None = None, status: str | None = "active") -> list[dict]:

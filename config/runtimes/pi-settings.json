@@ -1,0 +1,8 @@
+{
+  "shellPath": "E:\Git\bin\bash.exe",
+  "defaultProjectTrust": "never",
+  "enableInstallTelemetry": false,
+  "quietStartup": true,
+  "retry": { "enabled": true, "maxRetries": 3 },
+  "compaction": { "enabled": true }
+}
