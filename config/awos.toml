@@ -1,0 +1,127 @@
+# AgentWorkOS default configuration (committed; NO secrets here).
+# Machine-specific overrides go to config/local.toml (gitignored). Secrets go to var/secrets.toml (gitignored).
+
+[server]
+host = "127.0.0.1"          # localhost only by default
+port = 8765
+
+[paths]
+# Relative paths are resolved against the AgentWorkOS root.
+var = "var"
+workspaces = "var/workspaces"
+artifacts = "var/artifacts"
+logs = "var/logs"
+runs = "var/runs"
+backups = "var/backups"
+context = "var/context"
+inbox_drop = "var/inbox-drop"          # drop .md/.txt files here to create inbox items
+node_runtime = "runtime/node"          # portable Node >= 22.19 for pi / dsh
+
+[scheduler]
+tick_seconds = 15
+lease_seconds = 300                    # task lease; heartbeat renews it
+max_concurrent_runs = 3
+quiet_hours = ["23:30", "07:30"]       # no notifications (except risk=high) in this window
+autostart_max_level = 5                # tasks up to this level start automatically after triage
+autostart_min_priority = 3             # P0..P3 all eligible
+retry_backoff_seconds = [60, 300, 1800]
+
+[executors.codex]
+enabled = true
+command = "codex"
+model = ""                             # empty = codex default from ~/.codex/config.toml
+max_concurrent = 2
+timeout_seconds = 1800
+
+[executors.claude]
+enabled = true
+command = "claude"
+model = "sonnet"
+triage_model = "haiku"
+max_concurrent = 2
+timeout_seconds = 1500
+max_budget_usd_per_run = 1.5
+
+[executors.pi]
+enabled = false                        # enabled by scripts/install-runtimes after verification
+command = "pi"
+max_concurrent = 1
+timeout_seconds = 1500
+
+[executors.dsh]
+enabled = false
+command = "dsh"
+max_concurrent = 1
+timeout_seconds = 1500
+
+[routing]
+# category -> preferred executor order (first enabled wins). Planner/triage may override per task.
+triage = ["claude", "codex"]
+plan = ["codex", "claude"]
+dev = ["codex", "pi", "claude"]
+research = ["codex", "claude"]
+writing = ["claude", "codex"]
+doc = ["claude", "codex"]
+data = ["codex", "claude"]
+pm = ["claude", "codex"]
+schedule = ["claude", "codex"]
+comms = ["claude", "codex"]
+admin = ["claude", "codex"]
+career = ["claude", "codex"]
+learning = ["codex", "claude"]
+system = ["codex", "claude"]
+other = ["claude", "codex"]
+
+[budget]
+daily_usd = 8.0                        # pay-per-use executors (claude); hard stop when exceeded
+per_task_usd = 3.0
+codex_daily_runs = 60                  # subscription executor: cap number of runs/day
+
+[sensors.git]
+enabled = true
+interval_minutes = 60
+roots = ["D:/papers", "D:/phd", "D:/transfer", "D:/personal"]
+max_depth = 4
+stale_dirty_hours = 48                 # uncommitted changes older than this become a signal
+
+[sensors.files]
+enabled = true
+interval_minutes = 120
+roots = ["D:/papers", "D:/phd", "D:/transfer"]
+extensions = [".docx", ".doc", ".pptx", ".xlsx", ".pdf", ".md", ".tex", ".txt"]
+lookback_days = 7
+max_depth = 5
+
+[sensors.agent_history]
+enabled = true
+interval_minutes = 120
+lookback_days = 7
+
+[sensors.zotero]
+enabled = true
+interval_minutes = 360
+
+[sensors.inbox_drop]
+enabled = true
+interval_minutes = 1
+
+[sensors.gmail]
+enabled = true
+interval_minutes = 180
+active_hours = ["08:00", "23:00"]
+lookback_hours = 24
+
+[sensors.notion]
+enabled = true
+interval_minutes = 180
+active_hours = ["08:00", "23:00"]
+
+[sensors.gcal]
+enabled = false                        # Google Calendar is empty for this user; Notion holds the schedule
+
+[context]
+refresh_hours = 24
+
+[notify]
+channels = ["toast"]                   # toast | webhook (configure var/secrets.toml)
+digest_times = ["08:40", "21:30"]

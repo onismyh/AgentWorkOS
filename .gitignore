@@ -1,0 +1,13 @@
+var/
+external/
+runtime/
+__pycache__/
+*.pyc
+.venv/
+*.db
+*.db-*
+*.log
+config/local.toml
+config/secrets*
+.env
+node_modules/
