@@ -110,23 +110,44 @@ def pick_executor(route: str, preferred: str | None = None) -> str:
     raise RuntimeError(f"no available executor for route {route!r} (tried {order})")
 
 
-def reserve_budget(run_id: str, executor: str, reserve_usd: float) -> tuple[bool, str]:
-    """Admission control: reserve money (pay-per-use) or a run slot (subscription) before starting."""
+RESERVE_WAIT_S = 300
+RESERVE_POLL_S = 3
+
+
+def typical_cost(executor: str, purpose: str, cap: float) -> float:
+    """What a run of this kind usually costs (2x the recent average, at least $0.30, at most the per-run cap).
+    Reserving the worst case ($1.50) for every concurrent run made a single in-flight run block the next one
+    even with most of the day's budget unspent."""
+    row = repo.db.q1("SELECT AVG(cost_usd) a, COUNT(*) n FROM (SELECT cost_usd FROM runs WHERE executor = ? AND purpose = ? "
+                     "AND status = 'succeeded' AND cost_usd > 0 ORDER BY started_at DESC LIMIT 20)", (executor, purpose))
+    if not row or not row["n"]:
+        return round(cap, 3)  # no history yet: stay safe and reserve the full per-run cap
+    return round(min(cap, max(0.30, 2 * float(row["a"]))), 3)
+
+
+def reserve_budget(run_id: str, executor: str, reserve_usd: float) -> tuple[str, str]:
+    """Admission control: reserve money (pay-per-use) or a run slot (subscription) before starting.
+    Returns ("ok"|"budget"|"wait", reason): "budget" = real spend would exceed the cap (needs the human);
+    "wait" = it only does not fit next to other runs' in-flight reservations (retry shortly)."""
     cfg = load_config()
     with _budget_lock:
         if executor == "codex":
             cap = int(cfg.get("budget.codex_daily_runs", 60))
-            used = int(repo.cost_today("codex")["runs"]) + sum(1 for e in _inflight.values() if e == "codex")
-            if used >= cap:
-                return False, f"codex runs today {used}/{cap}"
+            done = int(repo.cost_today("codex")["runs"])
+            if done >= cap:
+                return "budget", f"codex runs today {done}/{cap}"
+            if done + sum(1 for e in _inflight.values() if e == "codex") >= cap:
+                return "wait", f"codex runs in flight would reach {cap}"
         else:
             cap_usd = float(cfg.get("budget.daily_usd", 8.0))
-            spent = float(repo.cost_today()["usd"]) + sum(_reserved.values())
+            spent = float(repo.cost_today()["usd"])
             if spent + reserve_usd > cap_usd:
-                return False, f"spent+reserved today ${spent:.2f} + ${reserve_usd:.2f} > ${cap_usd:.2f}"
+                return "budget", f"spent today ${spent:.2f} + ${reserve_usd:.2f} for this run > ${cap_usd:.2f}"
+            if spent + sum(_reserved.values()) + reserve_usd > cap_usd:
+                return "wait", f"spent ${spent:.2f} + in-flight ${sum(_reserved.values()):.2f} + ${reserve_usd:.2f} > ${cap_usd:.2f}"
             _reserved[run_id] = reserve_usd
         _inflight[run_id] = executor
-        return True, "ok"
+        return "ok", "ok"
 
 
 def release_budget(run_id: str) -> None:
@@ -180,11 +201,22 @@ def run_agent(prompt: str, *, purpose: str, route: str | None = None, executor: 
             cwd = log_dir / "cwd"
             cwd.mkdir(exist_ok=True)
         if check_budget:
-            ok, why = reserve_budget(run_id, name, float(budget_cap or 0.5) if name != "codex" else 0.0)
-            if not ok:
-                result = RunResult(status="failed", error=f"budget exhausted: {why}", error_class="budget")
-                return run_id, result
-            reserved = True
+            reserve = typical_cost(name, purpose, float(budget_cap or 0.5)) if name != "codex" else 0.0
+            deadline = time.monotonic() + RESERVE_WAIT_S
+            while True:
+                state, why = reserve_budget(run_id, name, reserve)
+                if state == "ok":
+                    reserved = True
+                    break
+                if state == "budget":  # the day's REAL spend (plus this run) would exceed the cap
+                    result = RunResult(status="failed", error=f"budget exhausted: {why}", error_class="budget")
+                    return run_id, result
+                # "wait": only other runs' in-flight reservations are in the way - they free up as those runs end
+                if cancel.is_set() or time.monotonic() > deadline:
+                    result = RunResult(status="failed", error=f"waited for budget reservations to free up: {why}",
+                                       error_class="transient")
+                    return run_id, result
+                time.sleep(RESERVE_POLL_S)
 
         def on_event(kind: str, ev_name: str | None, data: Any) -> None:
             try:

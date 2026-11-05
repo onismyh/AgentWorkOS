@@ -134,7 +134,7 @@ def dashboard(days: int = 14) -> dict:
     pending = (q("SELECT COUNT(*) n FROM approvals WHERE status = 'pending'") or [{"n": 0}])[0]["n"]
     since24 = _utc(datetime.now(timezone.utc) - timedelta(hours=24))
     midnight = _utc(datetime.combine(today, datetime.min.time(), tzinfo=tz()))
-    failures = (q("SELECT COUNT(*) n FROM runs WHERE status IN ('failed','timeout','interrupted') AND COALESCE(ended_at, started_at,'') >= ?", (since24,)) or [{"n": 0}])[0]["n"]
+    failures = (q("SELECT COUNT(*) n FROM runs WHERE status IN ('failed','timeout') AND COALESCE(ended_at, started_at,'') >= ?", (since24,)) or [{"n": 0}])[0]["n"]
     today_cost = repo.cost_today()
     from ..config import load_config
     kpis = {"inbox": sum(counts.get(s, 0) for s in ("review", "waiting_user", "triaged", "failed")), "approvals": pending,
@@ -171,7 +171,7 @@ def dashboard(days: int = 14) -> dict:
         "series": {"days": labels, "tasks_created": series("tasks", "created_at", "parent_id IS NULL"),
                    "tasks_done": series("tasks", "finished_at", "status = 'done' AND parent_id IS NULL"),
                    "signals": series("signals", "observed_at"), "runs": series("runs", "started_at"),
-                   "failures": series("runs", "started_at", "status IN ('failed','timeout','interrupted')"), "cost": cost},
+                   "failures": series("runs", "started_at", "status IN ('failed','timeout')"), "cost": cost},
         "levels": levels,
         "categories": [{"key": k, "label": CATEGORIES.get(k, k).split(" / ")[0].split("（")[0], "count": n}
                        for k, n in sorted(cats.items(), key=lambda x: -x[1])],

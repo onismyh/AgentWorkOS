@@ -677,7 +677,7 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
     @app.get("/api/overview")
     def overview() -> dict:
         since = _iso(datetime.now(timezone.utc) - timedelta(hours=24))
-        failed_runs = q1("SELECT COUNT(*) n FROM runs WHERE status IN ('failed', 'timeout', 'interrupted') "
+        failed_runs = q1("SELECT COUNT(*) n FROM runs WHERE status IN ('failed', 'timeout') "
                          "AND COALESCE(ended_at, started_at, '') >= ?", (since,)) or {"n": 0}
         failed_tasks = q1("SELECT COUNT(*) n FROM tasks WHERE status = 'failed' AND updated_at >= ?", (since,)) or {"n": 0}
         done_today = q1("SELECT COUNT(*) n FROM tasks WHERE status = 'done' AND finished_at >= ?", (_local_midnight_utc(),)) or {"n": 0}

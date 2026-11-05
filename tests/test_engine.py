@@ -424,3 +424,39 @@ def test_git_commit_action_refuses_dangerous_inputs(env):
                     {"repo": str(env["tmp"].parent), "paths": ["a.txt"], "message": "m"}):
         a = _approve_action("git_commit", payload)
         assert a["status"] == "failed", payload
+
+
+def test_budget_reservations_wait_but_real_overspend_fails(env, monkeypatch):
+    import awos.llm as llm
+    from awos import repo
+    repo.record_cost(None, "fake", None, 5.0)                       # real spend so far: $5 of the default $8
+    llm._reserved["other"], llm._inflight["other"] = 2.5, "fake"    # another run is in flight, reserving $2.5
+    assert llm.reserve_budget("me", "fake", 1.0)[0] == "wait"       # fits the day, just not next to the other run
+    llm.release_budget("other")
+    assert llm.reserve_budget("me", "fake", 1.0)[0] == "ok"
+    llm.release_budget("me")
+    repo.record_cost(None, "fake", None, 2.5)                       # real spend $7.5: one more $1 run would exceed $8
+    assert llm.reserve_budget("me2", "fake", 1.0)[0] == "budget"
+
+
+def test_run_agent_gives_transient_not_budget_error_when_only_reservations_block(env, monkeypatch):
+    import awos.llm as llm
+    monkeypatch.setattr(llm, "RESERVE_WAIT_S", 0.2)
+    monkeypatch.setattr(llm, "RESERVE_POLL_S", 0.05)
+    llm._reserved["other"], llm._inflight["other"] = 7.9, "fake"
+    try:
+        run_id, res = llm.run_agent("x", purpose="execute", executor="fake")
+    finally:
+        llm.release_budget("other")
+    assert res.status == "failed" and res.error_class == "transient" and "reservations" in res.error
+
+
+def test_typical_cost_tracks_recent_runs_and_respects_the_cap(env):
+    import awos.llm as llm
+    from awos import repo
+    assert llm.typical_cost("fake", "execute", 1.5) == 1.5                     # no history: reserve the full per-run cap
+    for c in (0.4, 0.5, 0.6):
+        rid = repo.create_run("execute", "fake")
+        repo.update_run(rid, status="succeeded", cost_usd=c, started_at=repo.utcnow())
+    assert llm.typical_cost("fake", "execute", 1.5) == 1.0                     # 2 x avg(0.5)
+    assert llm.typical_cost("fake", "execute", 0.8) == 0.8                     # never above the per-run cap
