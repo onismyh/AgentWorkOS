@@ -93,7 +93,9 @@ def create_from_result(task: dict, run_id: str, out: dict) -> list[str]:
                f"**将执行的载荷**：\n```json\n{json.dumps(payload, ensure_ascii=False, indent=2)[:3000]}\n```\n\n---\n{_task_context(task)}")
         ids.append(repo.create_approval(
             title=a["title"][:200], kind="action", action_type=atype, task_id=task["id"], run_id=run_id, context_md=ctx,
-            recommendation="approve" if risk != "high" else "请仔细核对后再批准", options=ACTION_OPTIONS, risk=risk,
+            recommendation=(f"approve：按「批准后将执行的内容」原样执行，风险{'低' if risk == 'low' else '中'}；批准前请先核对其中的文件、收件人和说明。"
+                            if risk != "high" else "请仔细核对后再批准：这是高风险动作，批准前务必逐项确认「批准后将执行的内容」。"),
+            options=ACTION_OPTIONS, risk=risk,
             payload={**payload, "_hash": payload_hash(payload)}, expires_at=_expiry(risk)))
     return ids
 

@@ -119,3 +119,10 @@ def test_handoff_appears_in_the_topic_history(two):
     key = topics.resolve([t])[t["id"]][0]
     texts = [h["text"] for h in topics.history(key)]
     assert any("从 fake 交给 fake2 继续做（预算不足）" in x for x in texts)
+
+
+def test_ids_created_in_the_same_second_sort_in_creation_order():
+    from awos.db import new_id
+    ids = [new_id("run") for _ in range(300)]
+    assert ids == sorted(ids) and len(set(ids)) == 300
+    assert all(len(i) == len("run_") + 12 + 3 + 3 for i in ids)

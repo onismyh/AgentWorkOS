@@ -33,9 +33,19 @@ def ts_after(seconds: float) -> str:
     return datetime.fromtimestamp(time.time() + seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_seq_lock = threading.Lock()
+_seq = 0
+
+
 def new_id(prefix: str) -> str:
-    """Sortable id: <prefix>_<yyyymmddHHMMSS><6 hex>."""
-    return f"{prefix}_{datetime.now(timezone.utc).strftime('%y%m%d%H%M%S')}{secrets.token_hex(3)}"
+    """Sortable id: <prefix>_<yymmddHHMMSS><3-digit sequence><3 hex>. The per-process sequence keeps ids created within the
+    same second in creation order (a random suffix alone made them sort arbitrarily); the hex suffix keeps ids from
+    different processes (daemon, CLI) apart."""
+    global _seq
+    with _seq_lock:
+        _seq = (_seq + 1) % 1000
+        seq = _seq
+    return f"{prefix}_{datetime.now(timezone.utc).strftime('%y%m%d%H%M%S')}{seq:03d}{secrets.token_hex(2)[:3]}"
 
 
 def dumps(obj: Any) -> str | None:

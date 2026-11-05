@@ -182,24 +182,43 @@ export function payloadView(payload) {
   return h`<pre class="code">${jsonText(payload, 12000)}</pre>`;
 }
 
-export function optionButtons(a) {
+export function optionButtons(a, { terse = false } = {}) {
   const recKey = recommendedKey(a);
   const opts = (a.options || []).filter((o) => o && o.key);
   if (!opts.length) return h`<div class="hint">该事项没有可选项</div>`;
-  return h`<div class="opt-grid">${opts.map((o) => {
+  return h`<div class="opt-grid${terse ? ' terse' : ''}">${opts.map((o) => {
     const rec = o.key === recKey; const rej = isRejectish(o.key);
-    return h`<button type="button" class="opt${rec ? ' rec' : ''}${rej ? ' rej' : ''}" data-act="decide" data-id="${a.id}" data-option="${o.key}" data-label="${o.label || o.key}">
-      <span class="opt-l">${rec ? h`<span class="opt-tag">${icon('sparkles', { size: 12 })}AI 推荐</span>` : ''}<b>${o.label || o.key}</b></span>${o.description ? h`<span class="opt-d">${o.description}</span>` : ''}</button>`;
+    return h`<button type="button" class="opt${rec ? ' rec' : ''}${rej ? ' rej' : ''}" data-act="decide" data-id="${a.id}" data-option="${o.key}" data-label="${o.label || o.key}" title="${o.description || ''}">
+      <span class="opt-l">${rec ? h`<span class="opt-tag">${icon('sparkles', { size: 12 })}AI 推荐</span>` : ''}<b>${o.label || o.key}</b></span>${o.description && !terse ? h`<span class="opt-d">${o.description}</span>` : ''}</button>`;
   })}</div>`;
 }
-export function decisionBlock(a, { compact = false } = {}) {
+/** What each option means, in the reading flow (the sticky decision bar only carries the option names). */
+function optionDetails(a) {
+  const opts = (a.options || []).filter((o) => o && o.key && o.description);
+  if (!opts.length) return '';
+  const recKey = recommendedKey(a);
+  return sec('各选项的含义', h`<ul class="optd">${opts.map((o) => h`<li><b>${o.label || o.key}</b>${o.key === recKey ? h`<span class="optd-rec">${icon('sparkles', { size: 11 })}AI 推荐</span>` : ''}<p>${o.description}</p></li>`)}</ul>`, { icon: 'file-text' });
+}
+export function decisionBlock(a, { compact = false, terse = false } = {}) {
   if (a.status !== 'pending') {
     return h`<div class="decided">${apvBadge(a.status)}<span>决策：<b>${a.decision || '—'}</b></span>${a.decision_note ? h`<span class="muted">备注：${a.decision_note}</span>` : ''}<span class="muted">${a.decided_via || ''} ${a.decided_at ? absTime(a.decided_at) : ''}</span></div>`;
   }
   return h`<div class="decide" data-approval="${a.id}">
     <label class="field"><span>备注（AI 会记住你写的话）<small class="muted"> 可选 · 修改意见也写在这里，随决策一起交给 AI</small></span><textarea class="textarea" name="note" rows="${compact ? 2 : 3}" data-dirty-key="note-${a.id}" placeholder="例如：把措辞改得更正式一些再发送"></textarea></label>
-    ${optionButtons(a)}</div>`;
+    ${optionButtons(a, { terse })}</div>`;
 }
+/* The decision bar is sticky; on a laptop screen it must never swallow the content the user needs to read first.
+   It stays compact, and the user can fold it away while reading (the choice is remembered per viewer). */
+const DECIDE_KEY = 'awos.decideCollapsed';
+function decideCollapsed() { try { return localStorage.getItem(DECIDE_KEY) === '1'; } catch { return false; } }
+ACTS['toggle-decide'] = (el) => {
+  const bar = el.closest('.rd-decide');
+  if (!bar) return;
+  const folded = bar.classList.toggle('collapsed');
+  el.setAttribute('aria-expanded', String(!folded));
+  el.textContent = folded ? '展开选项' : '收起';
+  try { localStorage.setItem(DECIDE_KEY, folded ? '1' : '0'); } catch { /* storage unavailable: just not remembered */ }
+};
 ACTS.decide = async (el) => {
   const a = CACHE.approvals.get(el.dataset.id);
   const card = el.closest('[data-approval]');
@@ -307,6 +326,14 @@ export function approvalReader(d, { mode = 'pane' } = {}) {
   const pending = a.status === 'pending';
   const recKey = recommendedKey(a);
   const recOpt = (a.options || []).find((o) => o.key === recKey);
+  // The model recommends with an option key ("approve", "A：…"): show the option's name instead of the bare key.
+  const rc = String(a.recommendation || '').trim();
+  let recText = rc;
+  if (recOpt) {
+    const m = rc.match(/^([^：:\s]+)\s*[：:]\s*([\s\S]*)$/);
+    if (m && m[1].toLowerCase() === String(recOpt.key).toLowerCase()) recText = `${recOpt.label || recOpt.key}：${m[2]}`;
+    else if (rc.toLowerCase() === String(recOpt.key).toLowerCase()) recText = recOpt.description || `选「${recOpt.label || recOpt.key}」`;
+  }
   const topic = a.topic || d.topic || (t && t.topic) || CACHE.topicOf.get(a.id) || null;
   return h`<article class="reader" data-reader="approval" data-id="${a.id}">
     <header class="rd-head">
@@ -324,14 +351,15 @@ export function approvalReader(d, { mode = 'pane' } = {}) {
     </header>
     <div class="rd-body">
       ${recapCard({ id: a.id, topic, ts: a.created_at })}
-      ${a.recommendation ? callout(recOpt ? `AI 建议：${recOpt.label || recOpt.key}` : 'AI 建议', md(a.recommendation), { icon: 'sparkles' }) : ''}
+      ${a.recommendation ? callout(recOpt ? `AI 建议：${recOpt.label || recOpt.key}` : 'AI 建议', md(recText), { icon: 'sparkles' }) : ''}
+      ${pending ? optionDetails(a) : ''}
       ${a.context_md ? sec('背景', md(a.context_md), { icon: 'file-text' }) : ''}
       ${a.payload != null && a.payload !== '' ? sec('批准后将执行的内容', payloadView(a.payload), { icon: 'send', open: a.kind === 'action' }) : ''}
       ${!pending ? sec('处理结果', h`${decisionBlock(a)}${a.result ? h`<pre class="code">${jsonText(a.result, 8000)}</pre>` : ''}`, { icon: 'check-check' }) : ''}
       ${t ? sec('来源与原文', h`<div data-lazy="evidence" data-task="${t.id}">${h`<div class="skel-block">${skel('45%', 12)}${skel('100%', 10)}${skel('92%', 10)}</div>`}</div>`, { icon: 'mail', open: false }) : ''}
       ${sec('时间线', timeline(d.events || []), { icon: 'history', count: (d.events || []).length, open: false })}
     </div>
-    ${pending ? h`<section class="rd-decide"><h3>${icon('shield-alert', { size: 16 })}你的决定${mode === 'pane' ? h`${kbd('E')}<small class="muted">选中 AI 推荐项</small>` : ''}</h3>${decisionBlock(a)}</section>` : ''}</article>`;
+    ${pending ? h`<section class="rd-decide${decideCollapsed() ? ' collapsed' : ''}"><h3>${icon('shield-alert', { size: 16 })}你的决定${mode === 'pane' ? h`${kbd('E')}<small class="muted">选中 AI 推荐项</small>` : ''}<button type="button" class="rd-decide-toggle" data-act="toggle-decide" aria-expanded="${!decideCollapsed()}">${decideCollapsed() ? '展开选项' : '收起'}</button></h3>${decisionBlock(a, { terse: true })}</section>` : ''}</article>`;
 }
 
 /* ------------------------------------------------------------------ mounting (lazy parts) */
