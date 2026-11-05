@@ -6,7 +6,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .. import repo
+from .. import db, repo
 from ..brain import planner, policy, prompts
 from ..brain.context import apply_updates, context_brief
 from ..brain.schemas import EXECUTE_SCHEMA, VERIFY_SCHEMA
@@ -79,6 +79,17 @@ def fail_or_retry(task: dict, owner: str, error: str | None, error_class: str | 
     if error_class == "cancelled":
         _move(task["id"], owner, TaskStatus.WAITING_USER, "运行被取消，等待人工处理")
         return
+    if error_class == "capacity":
+        # Only other runs' in-flight reservations were in the way: queue again WITHOUT using up a retry attempt.
+        # After ~1 hour of that (30 x 2 min) the budget is genuinely tight, so ask the human instead.
+        waits = int((task.get("meta") or {}).get("capacity_waits", 0)) + 1
+        if waits <= 30:
+            repo.merge_task_meta(task["id"], capacity_waits=waits)
+            db.execute("UPDATE tasks SET attempts = MAX(0, attempts - 1) WHERE id = ?", (task["id"],))
+            nxt = (datetime.now(timezone.utc) + timedelta(seconds=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            _move(task["id"], owner, TaskStatus.READY, f"等待预算额度释放（第 {waits} 次排队，不计入重试）", next_attempt_at=nxt)
+            return
+        error_class = "budget"
     if error_class == "budget":
         if not repo.list_approvals(status="pending", task_id=task["id"]):
             from ..hitl.outbox import create_budget_approval

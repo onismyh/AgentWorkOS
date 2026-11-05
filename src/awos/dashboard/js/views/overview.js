@@ -11,6 +11,8 @@ import { card, btn, badge, kwChips, levelBadge, prioIcon, execAvatar, empty, ris
 import { sparkline, segBar, funnel, hbars, costSpec, mountCostChart, costTable } from '../ui/charts.js';
 import { META, digestOf, levelName, sourceIcon, sourceLabel, purposeLabel, execSlot, catLabel } from '../domain/vocab.js';
 import { evBody } from '../ui/rundetail.js';
+import { countChips } from '../ui/topic-reader.js';
+import { ageWord, groupByTopic, oldTone, topicSel } from '../domain/topics.js';
 
 export async function loadDashboard() {
   let dash = await apiOpt('/dashboard?days=14');
@@ -49,18 +51,31 @@ function kpiCard({ label, ic, value, foot, href, spark, tone = '' }) {
     <div class="kpi-m"><div class="kpi-v">${value}</div><div class="kpi-s">${spark || ''}</div></div><div class="kpi-f">${foot}</div></a>`;
 }
 
+const NY_ICON = { decision: 'scale', approval: 'shield-alert', review: 'circle-dot', failed: 'circle-x', handoff: 'hand', suggested: 'sparkles' };
+const nyItem = (it) => {
+  const dg = digestOf(it, it.kind);
+  return h`<li><a class="ny" href="#/inbox?sel=${enc(`${it.kind}:${it.id}`)}">
+    <span class="ny-ic tone-${it.kind === 'approval' ? (it.risk === 'high' ? 'crit' : 'warn') : it.section === 'failed' ? 'crit' : it.section === 'review' || it.section === 'handoff' ? 'warn' : 'brand'}">${icon(NY_ICON[it.section] || 'sparkles', { size: 16 })}</span>
+    <span class="ny-m"><span class="ny-t">${dg.headline}</span><span class="ny-g">${dg.gist || ''}</span></span>
+    <span class="ny-r">${badge(it.section_title, { tone: it.section === 'failed' ? 'crit' : it.section === 'decision' || it.section === 'approval' ? 'warn' : 'muted' })}<span class="ny-w">${when(it.ts, { short: true })}</span></span></a></li>`;
+};
+
+/** 需要你处理: one block per topic (title, counts, how long it has waited), expandable to its items. */
 function needsYou(dash, inbox) {
-  const feed = (inbox.feed || []).slice(0, 5);
-  const total = (inbox.feed || []).length;
-  const body = feed.length ? h`<ul class="nylist">${feed.map((it) => {
-    const dg = digestOf(it, it.kind);
-    const cd = it.expires_at ? parseTs(it.expires_at) : null;
-    return h`<li><a class="ny" href="#/inbox?sel=${enc(`${it.kind}:${it.id}`)}">
-      <span class="ny-ic tone-${it.kind === 'approval' ? (it.risk === 'high' ? 'crit' : 'warn') : it.section === 'failed' ? 'crit' : 'brand'}">${icon(it.kind === 'approval' ? 'shield-alert' : it.section === 'review' ? 'circle-dot' : it.section === 'failed' ? 'circle-x' : it.section === 'handoff' ? 'hand' : 'sparkles', { size: 16 })}</span>
-      <span class="ny-m"><span class="ny-t">${dg.headline}</span><span class="ny-g">${dg.gist || ''}</span><span class="ny-k">${kwChips(dg.keywords, { max: 4 })}</span></span>
-      <span class="ny-r">${badge(it.section_title, { tone: it.section === 'failed' ? 'crit' : it.section === 'decision' || it.section === 'approval' ? 'warn' : 'muted' })}${it.kind === 'approval' ? riskBadge(it.risk) : it.level ? levelBadge(it) : ''}<span class="ny-w">${when(it.ts, { short: true })}</span></span></a></li>`;
-  })}</ul>` : empty({ icon: 'check-check', title: '没有需要你处理的事项', desc: '新的建议、审批和验收会实时出现在这里。' });
-  return card({ title: '需要你处理', ic: 'inbox', icon: 'inbox', desc: total ? `共 ${total} 项，按紧急程度排序` : '', cls: 'span-8', actions: total ? btn('打开收件箱', { href: '#/inbox', size: 'sm', variant: 'ghost', icon: 'arrow-right' }) : '', body, flush: true });
+  const feed = inbox.feed || [];
+  const total = feed.length;
+  const groups = groupByTopic(feed, inbox.topics || []);
+  const shown = groups.slice(0, 5);
+  const body = shown.length ? h`<ul class="nylist ny-topics">${shown.map((g, i) => {
+    const more = g.items.length - 4;
+    return h`<li class="ny-tp"><details id="nyt-${g.key}"${i === 0 ? raw(' open') : ''}>
+      <summary><span class="ny-chev">${icon('chevron-down', { size: 14 })}</span>
+        <span class="ny-tm"><a class="ny-tt" href="#/inbox?sel=${enc(topicSel(g.key))}" data-tip="打开话题：先看前情提要">${g.title}</a>${g.state_now ? h`<span class="ny-state">${g.state_now}</span>` : ''}</span>
+        <span class="ny-tr">${countChips(g.counts)}${g.oldest_ts ? h`<span class="tg-age tone-${oldTone(g.oldest_ts)}">${icon('clock', { size: 11 })}最早 ${ageWord(g.oldest_ts)}前</span>` : ''}</span></summary>
+      <ul class="ny-items">${g.items.slice(0, 4).map(nyItem)}${more > 0 ? h`<li><a class="ny-more" href="#/inbox?sel=${enc(topicSel(g.key))}">还有 ${more} 项，打开话题查看${icon('arrow-right', { size: 12 })}</a></li>` : ''}</ul></details></li>`;
+  })}${groups.length > shown.length ? h`<li class="ny-rest"><a href="#/inbox">还有 ${groups.length - shown.length} 个话题 · 共 ${total} 项，打开收件箱${icon('arrow-right', { size: 12 })}</a></li>` : ''}</ul>`
+    : empty({ icon: 'check-check', title: '没有需要你处理的事项', desc: '新的建议、审批和验收会实时出现在这里。' });
+  return card({ title: '需要你处理', ic: 'inbox', icon: 'inbox', desc: total ? `${groups.length} 个话题 · 共 ${total} 项，等得最久、需要你决定的在前` : '', cls: 'span-8', actions: total ? btn('打开收件箱', { href: '#/inbox', size: 'sm', variant: 'ghost', icon: 'arrow-right' }) : '', body, flush: true });
 }
 
 function levelsCard(dash) {

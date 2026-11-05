@@ -5,7 +5,7 @@ import { post } from '../core/api.js';
 import { ACTS } from '../core/acts.js';
 import { absTime, cut, parseTs, when } from '../core/format.js';
 import { touchTopic, topicSeenAt } from '../core/store.js';
-import { go, closeDrawer } from '../core/router.js';
+import { go } from '../core/router.js';
 import { icon } from './icons.js';
 import { btn, empty, skel } from './components.js';
 import { toast } from './overlay.js';
@@ -17,7 +17,7 @@ const GIVE_UP_MS = 4 * 60 * 1000;     // a regeneration normally takes 1-3 minut
 function entryHTML(e) {
   const k = KIND_VIEW[e.kind];
   const t = parseTs(e.ts);
-  return h`<li class="rc-i${k ? ` rc-${e.kind}` : ' rc-plain'}"><span class="rc-n tone-${k ? k.tone : 'muted'}">${k ? icon(k.icon, { size: 12 }) : ''}</span>
+  return h`<li class="rc-i tone-${k ? k.tone : 'muted'}${k ? ` rc-${e.kind}` : ' rc-plain'}"><span class="rc-n">${k ? icon(k.icon, { size: 12 }) : ''}</span>
     <div class="rc-b"><div class="rc-h">${k ? h`<span class="rc-k">${k.label}</span>` : ''}${t ? h`<time class="rc-t" datetime="${e.ts}">${absTime(e.ts)}</time><span class="rc-dot" aria-hidden="true">·</span>${when(e.ts)}` : ''}</div>
       <p class="rc-x">${e.text}</p></div></li>`;
 }
@@ -40,8 +40,8 @@ export async function fetchTopic(key, opts = {}) {
 
 /* ------------------------------------------------------------------ regenerate (POST, then wait for the SSE-driven refresh) */
 const genBtnHTML = (key, { label = '重新生成提要', size = 'sm', variant = 'ghost' } = {}) => (GEN.has(key)
-  ? btn('生成中…', { act: 'topic-refresh', data: { key }, size, variant, icon: 'loader', disabled: true, cls: 'spin gen-btn' })
-  : btn(label, { act: 'topic-refresh', data: { key }, size, variant, icon: 'refresh', cls: 'gen-btn' }));
+  ? btn('生成中…', { act: 'topic-refresh', data: { key, label }, size, variant, icon: 'refresh', disabled: true, cls: 'spin gen-btn' })
+  : btn(label, { act: 'topic-refresh', data: { key, label }, size, variant, icon: 'refresh', cls: 'gen-btn' }));
 export { genBtnHTML };
 
 function paintGenButtons(key) {
@@ -52,8 +52,6 @@ function paintGenButtons(key) {
     b.classList.toggle('spin', on);
     const label = $('.btn-label', b);
     if (label) label.textContent = on ? '生成中…' : (b.dataset.label || '重新生成提要');
-    const ic = $('.ic', b);
-    if (ic) ic.style.animation = '';
   });
   $$(`[data-gen-note="${CSS.escape(key)}"]`).forEach((n) => { n.hidden = !GEN.has(key); });
 }
@@ -103,8 +101,7 @@ export function recapCard({ id, topic, ts, extraIds = [] }) {
 ACTS['recap-toggle'] = (el) => { const d = el.closest('details'); if (d) { d.open = !d.open; d.dataset.touched = '1'; } };
 ACTS['open-topic'] = (el, e) => {
   e?.stopPropagation?.();
-  closeDrawer();
-  go('inbox', { sel: topicSel(el.dataset.key) });
+  go('inbox', { sel: topicSel(el.dataset.key) });   // the new hash carries no task / run param, so an open drawer closes by itself
 };
 ACTS['recap-retry'] = (el) => { const card = el.closest('[data-lazy="recap"]'); if (card) fillRecap(card, { force: true }); };
 
@@ -114,13 +111,13 @@ function whyNow(ask) {
     ${ask.question ? h`<p class="rc-q">${ask.question}</p>` : ''}${ask.why_now ? h`<p>${ask.why_now}</p>` : ''}${ask.stakes ? h`<p class="rc-stakes"><b>利害</b>${ask.stakes}</p>` : ''}</div></section>`;
 }
 
-/** Note + action under the recap: "提要由 AI 生成于 …，可能已过期" / "尚未生成". */
-export function briefNote(key, brief, { inline = false } = {}) {
+/** Note under the recap: "提要由 AI 生成于 …，可能已过期" / "还没有 AI 提要". `button: false` when the caller shows its own regenerate button. */
+export function briefNote(key, brief, { inline = false, button = true } = {}) {
   const gen = GEN.has(key);
   const genNote = h`<span class="rc-gen" data-gen-note="${key}"${gen ? '' : raw(' hidden')}>${icon('loader', { size: 12, cls: 'spin' })}正在重新生成，完成后会自动更新…</span>`;
-  if (!brief) return h`<p class="rc-note${inline ? ' inline' : ''}">${icon('sparkles', { size: 13 })}<span>还没有 AI 生成的提要，下面是系统记录的经过。</span>${genBtnHTML(key, { label: '生成提要' })}${genNote}</p>`;
+  if (!brief) return h`<p class="rc-note${inline ? ' inline' : ''}">${icon('sparkles', { size: 13 })}<span>还没有 AI 生成的提要，下面是系统记录的经过。</span>${button ? genBtnHTML(key, { label: '生成提要' }) : ''}${genNote}</p>`;
   if (!brief.stale && !gen) return '';
-  return h`<p class="rc-note${inline ? ' inline' : ''}">${icon('clock', { size: 13 })}<span>提要由 AI 生成于 ${absTime(brief.generated_at, true)}，可能已过期。</span>${genBtnHTML(key)}${genNote}</p>`;
+  return h`<p class="rc-note${inline ? ' inline' : ''}">${icon('clock', { size: 13 })}<span>${brief.stale ? h`提要由 AI 生成于 ${absTime(brief.generated_at, true)}，可能已过期。` : h`提要生成于 ${absTime(brief.generated_at, true)}。`}</span>${button ? genBtnHTML(key) : ''}${genNote}</p>`;
 }
 
 function bodyHTML(el, data) {

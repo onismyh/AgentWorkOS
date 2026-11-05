@@ -214,7 +214,7 @@ def run_agent(prompt: str, *, purpose: str, route: str | None = None, executor: 
                 # "wait": only other runs' in-flight reservations are in the way - they free up as those runs end
                 if cancel.is_set() or time.monotonic() > deadline:
                     result = RunResult(status="failed", error=f"waited for budget reservations to free up: {why}",
-                                       error_class="transient")
+                                       error_class="capacity")
                     return run_id, result
                 time.sleep(RESERVE_POLL_S)
 

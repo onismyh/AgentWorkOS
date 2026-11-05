@@ -448,7 +448,7 @@ def test_run_agent_gives_transient_not_budget_error_when_only_reservations_block
         run_id, res = llm.run_agent("x", purpose="execute", executor="fake")
     finally:
         llm.release_budget("other")
-    assert res.status == "failed" and res.error_class == "transient" and "reservations" in res.error
+    assert res.status == "failed" and res.error_class == "capacity" and "reservations" in res.error
 
 
 def test_typical_cost_tracks_recent_runs_and_respects_the_cap(env):
@@ -460,3 +460,23 @@ def test_typical_cost_tracks_recent_runs_and_respects_the_cap(env):
         repo.update_run(rid, status="succeeded", cost_usd=c, started_at=repo.utcnow())
     assert llm.typical_cost("fake", "execute", 1.5) == 1.0                     # 2 x avg(0.5)
     assert llm.typical_cost("fake", "execute", 0.8) == 0.8                     # never above the per-run cap
+
+
+def test_capacity_wait_requeues_without_using_a_retry_and_eventually_asks_the_human(env):
+    from awos import repo
+    from awos.engine.actions import add_manual_task
+    from awos.engine.worker import fail_or_retry
+    from awos.executors.base import RunResult  # noqa: F401
+    tid = add_manual_task("等额度的任务", level=2, category="research")
+    repo.set_task_status(tid, "ready", "t", force=True)
+    claimed = repo.claim_next_task("w", 60)
+    assert claimed["attempts"] == 1
+    fail_or_retry(claimed, "w", "waited for budget reservations", "capacity")
+    t = repo.get_task(tid)
+    assert t["status"] == "ready" and t["attempts"] == 0 and t["meta"]["capacity_waits"] == 1     # attempt handed back
+    assert t["next_attempt_at"] and "不计入重试" in t["status_reason"]
+    repo.merge_task_meta(tid, capacity_waits=30)                                                    # ~1 hour of waiting already
+    repo.db.execute("UPDATE tasks SET next_attempt_at = NULL WHERE id = ?", (tid,))
+    claimed = repo.claim_next_task("w", 60)
+    fail_or_retry(claimed, "w", "waited for budget reservations", "capacity")
+    assert repo.get_task(tid)["status"] == "waiting_approval" and repo.list_approvals(status="pending", task_id=tid)[0]["kind"] == "budget"

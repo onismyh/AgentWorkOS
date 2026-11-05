@@ -114,7 +114,7 @@ const GUESS = [
 ];
 export function guessKind(text) {
   const t = String(text || '').trim();
-  for (const [re, kind] of GUESS) if (re.test(t)) return /(产出|交付了|生成了.{0,8}(文档|报告|稿)|修订稿)/.test(t) && kind === 'ai' ? 'deliverable' : kind;
+  for (const [re, kind] of GUESS) if (re.test(t)) return /(产出|交付了|生成了.{0,8}(文档|报告|稿))/.test(t) && kind === 'ai' ? 'deliverable' : kind;
   return null;
 }
 /** Clean + order recap / history entries (oldest first); `kind` is only ever one of KIND_VIEW or null. */

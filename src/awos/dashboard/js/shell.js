@@ -220,7 +220,7 @@ function tickTimes() {
 
 /* ------------------------------------------------------------------ keyboard */
 let pendingG = 0;
-const G_MAP = { o: 'overview', b: 'board', i: 'inbox', x: 'outbox', t: 'tasks', r: 'runs', e: 'errors', a: 'artifacts', c: 'context', s: 'sensors', h: 'history' };
+const G_MAP = { o: 'overview', b: 'board', i: 'inbox', x: 'outbox', t: 'topics', w: 'tasks', r: 'runs', e: 'errors', a: 'artifacts', c: 'context', s: 'sensors', h: 'history' };
 function bindKeys() {
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented) return;
@@ -239,7 +239,7 @@ function bindKeys() {
     if (e.key === '?') { e.preventDefault(); ACTS.shortcuts(); return; }
     if (drawerOpen()) return;
     if (viewOf().keys?.(e)) return;
-    if (pendingG && Date.now() - pendingG < 1200) { pendingG = 0; const t = G_MAP[e.key]; if (t) { e.preventDefault(); go(t); } return; }
+    if (pendingG && Date.now() - pendingG < 1200) { pendingG = 0; const t = G_MAP[e.key]; if (t) { e.preventDefault(); if (t === 'topics') ACTS['go-topics']?.(); else go(t); } return; }
     if (e.key === 'g') { pendingG = Date.now(); return; }
     if (e.key === 'n') { e.preventDefault(); ACTS['new-task'](); }
     else if (e.key === 'r') { e.preventDefault(); refresh(true); }

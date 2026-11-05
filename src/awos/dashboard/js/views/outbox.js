@@ -1,7 +1,8 @@
 // Outbox: approvals reader (risk, payload, expiry, options with the AI recommendation emphasised) + decided history.
+// Pending approvals are grouped by topic like the inbox (topic names come from the inbox feed: /api/approvals has none).
 import { h, enc } from '../core/html.js';
 import { api } from '../core/api.js';
-import { S, cacheApproval } from '../core/state.js';
+import { S, CACHE, cacheApproval } from '../core/state.js';
 import { empty, skeletonList, tabs } from '../ui/components.js';
 import { Split, setActiveSplit, splitKeys } from './split.js';
 import { digestOf, META } from '../domain/vocab.js';
@@ -10,12 +11,16 @@ import { parseTs } from '../core/format.js';
 const DECIDED = 'approved,rejected,expired,cancelled,executing,executed,failed';
 const tabParam = () => S.params.get('tab') || 'pending';
 
-function toItems(list) {
+function toItems(list, tmap = null) {
   return list.map((a) => {
     cacheApproval(a);
     const dg = digestOf(a, 'approval');
     const decided = a.status !== 'pending';
+    const f = tmap?.get(a.id);
+    const topic = decided || !tmap ? {} : { topic_key: f?.topic_key || 'c:other', topic_title: f?.topic_title || '其他' };
+    if (topic.topic_key) CACHE.topicOf.set(a.id, { key: topic.topic_key, title: topic.topic_title });
     return {
+      ...topic,
       key: `approval:${a.id}`, dom: `approval_${a.id}`, kind: 'approval', id: a.id, task_id: a.task_id, section: decided ? 'history' : (a.kind === 'decision' ? 'decision' : 'approval'),
       headline: dg.headline, gist: dg.gist || (decided ? `${META.apvLabel[a.status] || a.status}${a.decision ? ` · ${a.decision}` : ''}` : ''), keywords: dg.keywords, auto: dg.auto,
       title: a.title, level: a.task_level, risk: a.risk, action_type: a.action_type, status: a.status, ts: decided ? (a.decided_at || a.created_at) : a.created_at,
@@ -33,13 +38,15 @@ const ctl = new Split({
   ],
   async fetch() {
     const pending = tabParam() === 'pending';
-    const d = await api(`/approvals?status=${pending ? 'pending' : DECIDED}&limit=${pending ? 500 : 200}`);
-    let items = toItems(d.approvals);
+    const [d, inb] = await Promise.all([api(`/approvals?status=${pending ? 'pending' : DECIDED}&limit=${pending ? 500 : 200}`),
+      pending ? api('/inbox').catch(() => null) : null]);   // the feed knows which topic each pending approval belongs to
+    const tmap = inb ? new Map((inb.feed || []).filter((f) => f.kind === 'approval').map((f) => [f.id, f])) : null;
+    let items = toItems(d.approvals, tmap);
     if (pending) {
       const risk = { high: 0, medium: 1, low: 2 };
       items.sort((a, b) => (risk[a.risk] ?? 1) - (risk[b.risk] ?? 1) || String(parseTs(a.expires_at)?.getTime() ?? 9e15).localeCompare(String(parseTs(b.expires_at)?.getTime() ?? 9e15)));
     }
-    return { items, extra: null };
+    return { items, extra: null, topics: inb?.topics || [] };
   },
   detail: (it) => api(`/approvals/${enc(it.id)}`),
   emptyAll: () => empty({ icon: 'send', title: tabParam() === 'pending' ? '没有待决策的事项' : '还没有处理记录', desc: tabParam() === 'pending' ? 'AI 提议的对外动作和需要你拍板的决策会出现在这里。' : '' }),

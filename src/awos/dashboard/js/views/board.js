@@ -16,7 +16,7 @@ const COL_VIEW = {
   suggested: { icon: 'circle-dashed', tone: 'brand' }, queued: { icon: 'circle-half', tone: 'muted' }, running: { icon: 'loader', tone: 'brand', spin: true },
   needs_you: { icon: 'hand', tone: 'warn' }, done: { icon: 'circle-check', tone: 'good' }, failed: { icon: 'circle-x', tone: 'crit' }, dismissed: { icon: 'ban', tone: 'muted' },
 };
-const GROUPS = [{ key: 'none', label: '无' }, { key: 'level', label: '等级' }, { key: 'category', label: '类别' }, { key: 'project', label: '项目' }];
+const GROUPS = [{ key: 'none', label: '无' }, { key: 'topic', label: '话题' }, { key: 'level', label: '等级' }, { key: 'category', label: '类别' }, { key: 'project', label: '项目' }];
 const B = {
   data: null, f: { q: '', level: '', category: '', project: '', executor: '' },
   group: pref.get('board.group', 'none'), density: pref.get('board.density', 'comfortable'),
@@ -51,7 +51,7 @@ export async function load() {
 const matches = (t) => {
   const f = B.f;
   if (f.q) {
-    const hay = `${t.headline} ${t.title} ${t.gist} ${(t.keywords || []).join(' ')} ${t.project || ''} ${t.id}`.toLowerCase();
+    const hay = `${t.headline} ${t.title} ${t.gist} ${(t.keywords || []).join(' ')} ${t.project || ''} ${t.topic_title || ''} ${t.id}`.toLowerCase();
     if (!hay.includes(f.q.toLowerCase())) return false;
   }
   if (f.level && String(effLevel(t)) !== f.level) return false;
@@ -60,7 +60,7 @@ const matches = (t) => {
   if (f.executor && (t.executor || '') !== f.executor) return false;
   return true;
 };
-const laneKey = (t) => (B.group === 'level' ? `L${effLevel(t)}` : B.group === 'category' ? catLabel(t.category) : B.group === 'project' ? (t.project || '（无项目）') : '');
+const laneKey = (t) => (B.group === 'topic' ? (t.topic_title || '（无话题）') : B.group === 'level' ? `L${effLevel(t)}` : B.group === 'category' ? catLabel(t.category) : B.group === 'project' ? (t.project || '（无项目）') : '');
 const laneSort = (a, b) => (B.group === 'level' ? a.localeCompare(b) : a.startsWith('（') ? 1 : b.startsWith('（') ? -1 : a.localeCompare(b, 'zh'));
 
 /* ------------------------------------------------------------------ card */
@@ -78,6 +78,7 @@ export function boardCard(t, col, density) {
   return h`<article class="bcard${overdue ? ' overdue' : ''}" draggable="true" tabindex="0" role="button" data-act="open-task" data-id="${t.id}" data-col="${col}" data-status="${t.status}" aria-label="${dg.headline}">
     <div class="bc-top">${statusIcon(t.status)}<h4 class="bc-title">${dg.headline}</h4>${quickActions(t, col)}</div>
     ${density === 'comfortable' && dg.gist ? h`<p class="bc-gist">${dg.gist}</p>` : ''}
+    ${t.topic_key ? h`<div class="bc-tp"><button type="button" class="bc-topic" data-act="open-topic" data-key="${t.topic_key}" data-tip="话题：${t.topic_title}（点击查看前情提要）">${icon('layers', { size: 11 })}<span>${t.topic_title}</span></button></div>` : ''}
     ${dg.keywords.length ? h`<div class="bc-kws">${kwChips(dg.keywords, { max: density === 'comfortable' ? 4 : 3 })}</div>` : ''}
     <div class="bc-meta">${levelBadge(t)}${prioIcon(t.priority)}<span class="bc-cat">${catLabel(t.category)}</span>${t.status !== primary && META.statusLabel[t.status] && col !== 'running' ? h`<span class="bc-st">${META.statusLabel[t.status]}</span>` : ''}<span class="grow"></span>${t.executor ? execAvatar(t.executor, { size: 20 }) : ''}</div>
     ${density === 'comfortable' && (t.project || due || t.cost_usd) ? h`<div class="bc-sub">${t.project ? h`<span class="bc-i">${icon('folder', { size: 12 })}${cut(t.project, 16)}</span>` : ''}${due ? h`<span class="bc-i${overdue ? ' tone-crit-ink' : ''}">${icon('calendar', { size: 12 })}${overdue ? '逾期 ' : ''}${absTime(t.due_at)}</span>` : ''}${t.cost_usd ? h`<span class="bc-i">${icon('dollar', { size: 12 })}${usd(t.cost_usd).replace('$', '')}</span>` : ''}</div>` : ''}

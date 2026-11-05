@@ -251,6 +251,129 @@ console.log('ok');
 
 
 @needs_node
+def test_topic_grouping_recap_and_reader_logic():
+    """Topics (group / order / counts), recap entries (order, kind guess), the open-by-default rule, escaping, list navigation."""
+    root = json.dumps(DASH.joinpath("js").as_posix())
+    code = f"""
+import {{ pathToFileURL }} from 'node:url';
+const store = new Map();
+globalThis.localStorage = {{ getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) }};
+const u = (p) => pathToFileURL({root} + '/' + p).href;
+const bad = []; const must = (n, c) => {{ if (!c) bad.push(n); }};
+const T = await import(u('domain/topics.js'));
+const R = await import(u('ui/recap.js'));
+const TR = await import(u('ui/topic-reader.js'));
+const St = await import(u('core/store.js'));
+const S = await import(u('core/state.js'));
+const inbox = await import(u('views/inbox.js'));
+const split = await import(u('views/split.js'));
+const day = 86400000; const now = Date.now();
+const iso = (ms) => new Date(ms).toISOString().replace(/\\.\\d{{3}}Z$/, 'Z');
+
+// ---- grouping: pending decisions first, then approvals, then the longest-waiting; the server order wins when given
+const items = [
+  {{ key: 'a', section: 'suggested', ts: '2026-11-01T00:00:00Z', topic_key: 't2', topic_title: 'T2' }},
+  {{ key: 'b', section: 'decision', ts: '2026-11-03T00:00:00Z', topic_key: 't1', topic_title: 'T1' }},
+  {{ key: 'c', section: 'approval', ts: '2026-11-02T00:00:00Z', project: 'thuthesis' }},
+  {{ key: 'd', section: 'failed', ts: '2026-11-04T00:00:00Z', category: 'writing' }},
+];
+const g0 = T.groupByTopic(items, []);
+must('urgency order', g0.map((g) => g.key).join() === 't1,p:thuthesis,t2,c:writing');
+must('fallback topic from project', g0[1].title === 'thuthesis' && g0[1].items[0].key === 'c');
+must('counts per section', g0[0].counts.decision === 1 && g0[0].counts.total === 1 && g0[2].counts.suggested === 1);
+must('oldest per topic', g0[2].oldest_ts === '2026-11-01T00:00:00Z');
+const g1 = T.groupByTopic(items, [{{ key: 't2', title: 'Server T2', state_now: 'now', has_brief: true, brief_stale: true }}, {{ key: 't1', title: 'Server T1' }}]);
+must('server order and fields win', g1.map((g) => g.key).slice(0, 2).join() === 't2,t1' && g1[0].title === 'Server T2' && g1[0].state_now === 'now' && g1[0].brief_stale === true);
+must('countsText', T.countsText({{ decision: 2, approval: 1, review: 0 }}) === '决定 2 · 批准 1');
+must('ageWord', T.ageWord('2026-11-02T12:00:00Z', Date.parse('2026-11-05T12:00:00Z')) === '3 天' && T.ageWord('2026-11-05T09:00:00Z', Date.parse('2026-11-05T12:00:00Z')) === '3 小时');
+must('topic selection keys', T.isTopicKey('topic:p:x') && T.topicFromSel('topic:p:x') === 'p:x' && !T.isTopicKey('task:abc'));
+
+// ---- recap entries: oldest first, empty dropped, kinds validated or guessed
+const ents = T.normalizeEntries([
+  {{ ts: '2026-11-03T00:00:00Z', text: 'AI 补全了推导，产出修订稿', kind: 'bogus' }},
+  {{ ts: '2026-11-01T00:00:00Z', text: '收到导师的邮件' }},
+  {{ ts: '2026-11-02T00:00:00Z', text: '你选择了「稍后再定」', kind: 'user' }},
+  {{ ts: '2026-11-04T00:00:00Z', text: '   ' }},
+]);
+must('entries sorted + filtered', ents.length === 3 && ents[0].text.startsWith('收到') && ents[2].text.startsWith('AI'));
+must('kinds guessed', ents[0].kind === 'found' && ents[1].kind === 'user' && ents[2].kind === 'deliverable');
+must('guess: ai / none', T.guessKind('AI 起草了邮件，附上修订稿') === 'ai' && T.guessKind('随便一句话') === null);
+
+// ---- recap card default: open when the item or the topic is old (> 24 h) or not opened for > 24 h
+St.touchTopic('seen', now); St.touchTopic('stale', now - 2 * day);
+must('young item + seen topic is collapsed', R.defaultOpen({{ ts: iso(now - 3600e3), topicKey: 'seen' }}) === false);
+must('old item opens', R.defaultOpen({{ ts: iso(now - 3 * day), topicKey: 'seen' }}) === true);
+must('topic not opened for > 24 h opens', R.defaultOpen({{ ts: iso(now - 3600e3), topicKey: 'stale' }}) === true);
+must('never-seen topic opens', R.defaultOpen({{ ts: iso(now - 3600e3), topicKey: 'new' }}) === true);
+must('card needs a topic', String(R.recapCard({{ id: 'x', topic: null }})) === '');
+const card = String(R.recapCard({{ id: 'tsk_1', topic: {{ key: 'p:a', title: '<b>论文</b>' }}, ts: iso(now - 3 * day) }}));
+must('card markup', card.includes('data-lazy="recap"') && card.includes('data-topic="p:a"') && card.includes(' open') && card.includes('前情提要') && !card.includes('<b>论文'));
+
+// ---- escaping: model-written recap / ask text never becomes markup
+const evil = '<img src=x onerror=alert(1)><script>alert(2)</script>';
+const tl = String(R.recapTimeline([{{ ts: '2026-11-01T00:00:00Z', text: evil, kind: 'ai' }}]));
+must('timeline escapes', !tl.includes('<img') && !tl.includes('<script') && tl.includes('&lt;img') && tl.includes('rc-tl') && tl.includes('rc-ai'));
+must('timeline empty state', String(R.recapTimeline([])).includes('这个话题没有历史记录'));
+S.CACHE.approvals.set('apv_1', {{ id: 'apv_1', status: 'pending', risk: 'low', options: [{{ key: 'yes', label: '好' }}, {{ key: 'no', label: '不' }}], recommendation: 'yes: ' + evil }});
+const rd = String(TR.topicReader({{ key: 'k', title: evil, brief: {{ state_now: evil, recap: [{{ ts: '2026-11-01T00:00:00Z', text: evil }}], asks: [{{ id: 'apv_1', question: evil, why_now: evil, stakes: evil }}], generated_at: '2026-11-05T00:00:00Z', stale: true }},
+  history: [{{ ts: '2026-11-01T00:00:00Z', kind: 'found', text: evil }}], items: [{{ kind: 'approval', id: 'apv_1', section: 'decision', title: evil, headline: evil, gist: evil, ts: '2026-11-01T00:00:00Z', risk: 'low' }},
+  {{ kind: 'task', id: 'tsk_1', section: 'review', title: 'x', headline: 'x', status: 'review', ts: '2026-11-02T00:00:00Z' }}], counts: {{}}, age_days: 4 }}));
+must('topic reader escapes', !rd.includes('<img') && !rd.includes('<script') && rd.includes('&lt;script'));
+must('topic reader structure', rd.includes('data-reader="topic"') && rd.includes('现状') && rd.includes('前情提要') && rd.includes('现在需要你') && rd.includes('data-act="topic-dismiss"') && rd.includes('data-act="topic-refresh"'));
+must('topic reader reuses the decision buttons', rd.includes('data-act="decide"') && rd.includes('data-option="yes"') && rd.includes('data-act="task-action"') && rd.includes('可能已过期'));
+must('topic reader empty items', String(TR.topicReader({{ key: 'k', title: 'T', brief: null, history: [], items: [], counts: {{}} }})).includes('这个话题没有历史记录'));
+
+// ---- inbox rows carry the topic (server fields first, project / category fallback)
+const rows = inbox.inboxItems({{ feed: [
+  {{ section: 'decision', section_title: '需你决定', kind: 'approval', id: 'apv_9', task_id: 't9', headline: 'H', gist: 'G', keywords: ['k'], title: 'T', status: 'pending', ts: '2026-11-05T08:00:00Z', topic_key: 'thesis', topic_title: '论文' }},
+  {{ section: 'suggested', section_title: 'AI 的新建议', kind: 'task', id: 'tsk_9', task_id: 'tsk_9', title: 'No topic', status: 'triaged', ts: '2026-11-05T09:00:00Z' }}],
+  decisions: [], actions: [], review: [], handoff: [], suggested: [{{ id: 'tsk_9', project: 'proj', category: 'dev' }}], failed: [] }});
+must('rows keep server topic', rows[0].topic_key === 'thesis' && rows[0].topic_title === '论文');
+must('rows fall back to project', rows[1].topic_key === 'p:proj' && S.CACHE.topicOf.get('tsk_9').key === 'p:proj');
+
+// ---- list navigation over topic headers and their items
+const ctl = new split.Split({{ id: 'unit', title: '收件箱', icon: 'inbox', sections: [], emptyAll: () => '' }});
+const mk = (key, topic, section, ts) => ({{ key, dom: key, kind: 'task', id: key, section, headline: key, gist: '', keywords: [], title: key, topic_key: topic, topic_title: topic, ts, stamp: ts, level: 1 }});
+ctl.adopt({{ items: [mk('task:a1', 'A', 'suggested', '2026-11-01T00:00:00Z'), mk('task:b1', 'B', 'decision', '2026-11-03T00:00:00Z'), mk('task:b2', 'B', 'review', '2026-11-03T01:00:00Z'), mk('task:a2', 'A', 'failed', '2026-11-02T00:00:00Z')], extra: null, topics: [] }});
+must('mode defaults to topic', ctl.mode() === 'topic' && ctl.hasTopics());
+must('keys: header then items, urgent topic first', ctl.visibleKeys().join() === 'topic:B,task:b1,task:b2,topic:A,task:a1,task:a2');
+ctl.collapsed = {{ B: true }};
+must('collapsed topic keeps only its header', ctl.visibleKeys().join() === 'topic:B,topic:A,task:a1,task:a2');
+ctl.collapsed = {{}};
+must('find topic by selection key', ctl.findTopic('topic:A').items.length === 2 && ctl.exists('topic:B') && ctl.exists('task:a1') && !ctl.exists('topic:zzz'));
+must('after clearing the last item of a topic, the next item is opened first', ctl.neighbourOf('task:b2') === 'task:a1' && ctl.neighbourOf('task:a2') === 'task:a1');
+const prev = ctl.visibleKeys();
+ctl.adopt({{ items: ctl.items.filter((i) => i.topic_key !== 'B'), extra: null, topics: [] }});
+must('successor of a vanished topic is the next topic', ctl.successor(prev, 'topic:B') === 'topic:A');
+must('successor of a vanished item stays an item', ctl.successor(prev, 'task:b2') === 'task:a1');
+if (bad.length) {{ console.log('FAILED: ' + bad.join(', ')); process.exit(1); }}
+console.log('ok');
+"""
+    r = run_node(code)
+    assert r.returncode == 0, (r.stdout + r.stderr)[:2000]
+
+
+@needs_node
+def test_topic_actions_and_modules_are_registered():
+    """The new handlers exist; `g t` is the topic list now (tasks moved to `g w`)."""
+    root = json.dumps((DASH / "js").as_posix())
+    code = f"""
+import {{ pathToFileURL }} from 'node:url';
+const root = {root};
+await import(pathToFileURL(root + '/shell.js').href);
+const {{ ACTS }} = await import(pathToFileURL(root + '/core/acts.js').href);
+const need = ['topic-toggle', 'topic-collapse-all', 'split-group', 'open-item', 'recap-toggle', 'open-topic', 'recap-retry', 'topic-refresh', 'topic-dismiss', 'go-topics'];
+const missing = need.filter((k) => typeof ACTS[k] !== 'function');
+if (missing.length) {{ console.log('MISSING ' + missing.join(', ')); process.exit(1); }}
+console.log('ok');
+"""
+    r = run_node(code)
+    assert r.returncode == 0, (r.stdout + r.stderr)[:800]
+    shell = (DASH / "js" / "shell.js").read_text(encoding="utf-8")
+    assert "t: 'topics'" in shell and "w: 'tasks'" in shell, "g t = topic list, g w = tasks"
+
+
+@needs_node
 def test_every_data_act_in_templates_has_a_registered_handler():
     """data-act / data-change / data-input / data-form names used in markup must exist in the action registries."""
     root = json.dumps((DASH / "js").as_posix())
@@ -335,6 +458,8 @@ def test_served_module_graph_is_complete(client):
             target = next(x for x in rel_import if x)
             queue.append(posixpath.normpath(posixpath.join(base, target)))
     assert len(seen) >= 20, sorted(seen)
+    assert {"js/domain/topics.js", "js/ui/recap.js", "js/ui/topic-reader.js"} <= seen, sorted(seen)
+    assert "css/topics.css" in css.text, "the topics stylesheet is imported"
 
 
 def test_new_api_contract_is_what_the_ui_expects(client):
@@ -349,3 +474,34 @@ def test_new_api_contract_is_what_the_ui_expects(client):
     assert "feed" in inbox and "counts" in inbox
     meta = client.get("/api/meta").json()
     assert "levels" in meta and "transitions" in meta
+
+
+def test_topics_api_contract_the_ui_reads(client):
+    """Topics: /api/inbox carries `topics` + per-entry topic fields, /api/topics/{key} has the recap inputs, topic mutations need the token."""
+    from urllib.parse import quote
+
+    from awos import repo
+    tid = repo.create_task("检查 thuthesis 仓库未提交改动", status="triaged", project="thuthesis")
+    aid = repo.create_approval(title="选哪个方案？", kind="decision", task_id=tid, options=[{"key": "a", "label": "A"}, {"key": "b", "label": "B"}])
+    inbox = client.get("/api/inbox").json()
+    assert inbox["topics"], "inbox returns a topic list"
+    for t in inbox["topics"]:
+        assert {"key", "title", "counts", "oldest_ts", "newest_ts", "age_days", "state_now", "has_brief", "brief_stale"} <= set(t), t
+        assert {"decisions", "approvals", "review", "handoff", "suggested", "failed", "total"} <= set(t["counts"])
+    assert inbox["feed"] and all(f.get("topic_key") and f.get("topic_title") for f in inbox["feed"]), "every feed entry has a topic"
+    key = next(f["topic_key"] for f in inbox["feed"] if f["id"] == aid)
+    enc = quote(key, safe="")
+    d = client.get(f"/api/topics/{enc}").json()
+    assert {"key", "title", "brief", "history", "items", "counts", "age_days"} <= set(d)
+    assert isinstance(d["history"], list) and d["brief"] is None
+    assert {i["id"] for i in d["items"]} >= {tid, aid}, "ask ids equal the feed ids"
+    assert client.get(f"/api/approvals/{aid}").json()["approval"]["topic"]["key"] == key
+    assert client.get(f"/api/tasks/{tid}").json()["task"]["topic"]["key"] == key
+    assert client.get("/api/topics/nope-not-a-topic").status_code == 404, "unknown topic -> 404 (the UI falls back to the list data)"
+    for path, body in ((f"/api/topics/{enc}/refresh", {}), (f"/api/topics/{enc}/dismiss", {"note": "不用管了"})):
+        assert client.post(path, json=body).status_code == 401, "mutating topic calls need the token"
+    H = {"X-AWOS-Token": "t0ken"}
+    assert client.post(f"/api/topics/{enc}/dismiss", json={"note": "好"}, headers=H).status_code == 422, "a reason of 2+ characters is required"
+    ok = client.post(f"/api/topics/{enc}/dismiss", json={"note": "这个仓库不用再追踪了"}, headers=H).json()
+    assert ok["ok"] is True and ok["dismissed"] >= 1
+    assert not [t for t in client.get("/api/inbox").json()["topics"] if t["key"] == key], "a dismissed topic leaves the inbox"

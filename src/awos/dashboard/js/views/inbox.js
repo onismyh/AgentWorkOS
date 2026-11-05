@@ -1,11 +1,15 @@
-// 收件箱: keyword-digest list + reading pane showing everything.
+// 收件箱: items grouped by topic (话题, default) or by type; a topic reader with the 前情提要 and a reading pane for items.
 import { h } from '../core/html.js';
 import { api } from '../core/api.js';
-import { S, cacheTask, cacheApproval } from '../core/state.js';
+import { S, CACHE, cacheTask, cacheApproval } from '../core/state.js';
+import { ACTS } from '../core/acts.js';
+import { pref } from '../core/store.js';
+import { go } from '../core/router.js';
 import { enc } from '../core/html.js';
 import { empty, skeletonList } from '../ui/components.js';
 import { Split, setActiveSplit, splitKeys } from './split.js';
 import { digestOf } from '../domain/vocab.js';
+import { topicKeyOf, topicTitleOf } from '../domain/topics.js';
 
 export const INBOX_SECTIONS = [
   { key: 'decision', title: '需你决定', tone: 'warn', hint: 'AI 已分析，选一项即可' },
@@ -28,7 +32,7 @@ export function inboxItems(d) {
     for (const [k, [section, section_title]] of Object.entries(sect)) {
       for (const x of d[k] || []) {
         const approval = k === 'decisions' || k === 'actions';
-        feed.push({ section, section_title, kind: approval ? 'approval' : 'task', id: x.id, task_id: approval ? x.task_id : x.id, title: x.title, level: approval ? x.task_level : x.effective_level, priority: x.priority, risk: x.risk, action_type: x.action_type, status: x.status, ts: x.updated_at || x.created_at, expires_at: x.expires_at, headline: x.headline, gist: x.gist, keywords: x.keywords, digest_auto: x.digest_auto });
+        feed.push({ section, section_title, topic_key: x.topic_key, topic_title: x.topic_title, kind: approval ? 'approval' : 'task', id: x.id, task_id: approval ? x.task_id : x.id, title: x.title, level: approval ? x.task_level : x.effective_level, priority: x.priority, risk: x.risk, action_type: x.action_type, status: x.status, ts: x.updated_at || x.created_at, expires_at: x.expires_at, headline: x.headline, gist: x.gist, keywords: x.keywords, digest_auto: x.digest_auto });
       }
     }
   }
@@ -37,7 +41,10 @@ export function inboxItems(d) {
     const dg = digestOf({ ...r, ...f }, f.kind);
     if (f.kind === 'task') cacheTask({ ...r, ...f, id: f.id, headline: dg.headline });
     else cacheApproval({ ...r, id: f.id });
+    const tkey = topicKeyOf({ ...r, ...f }); const ttitle = topicTitleOf({ ...r, ...f });
+    CACHE.topicOf.set(f.id, { key: tkey, title: ttitle });
     return {
+      topic_key: tkey, topic_title: ttitle,
       key: `${f.kind}:${f.id}`, dom: `${f.kind}_${f.id}`, kind: f.kind, id: f.id, task_id: f.task_id, section: f.section, section_title: f.section_title,
       headline: dg.headline, gist: dg.gist, keywords: dg.keywords, auto: dg.auto, title: f.title || r.title || '', level: f.level, priority: f.priority ?? r.priority,
       risk: f.risk, action_type: f.action_type, status: f.status, ts: f.ts, stamp: String(f.ts || ''), expires_at: f.expires_at,
@@ -49,13 +56,21 @@ export function inboxItems(d) {
 
 const ctl = new Split({
   id: 'inbox', title: '收件箱', icon: 'inbox', sections: INBOX_SECTIONS, autoSelect: false,
-  async fetch() { const d = await api('/inbox'); return { items: inboxItems(d), extra: d.counts }; },
+  async fetch() { const d = await api('/inbox'); return { items: inboxItems(d), extra: d.counts, topics: d.topics || [] }; },
   async detail(it) { return it.kind === 'approval' ? api(`/approvals/${enc(it.id)}`) : api(`/tasks/${enc(it.id)}`); },
   emptyAll: () => empty({ icon: 'check-check', title: '收件箱已清空', desc: '新的事项出现时会实时显示在这里。' }),
 });
 
+/** `g` then `t`: the topic list (switches to the 按话题 grouping, focuses the list, opens the current / first topic). */
+ACTS['go-topics'] = () => {
+  pref.set('inbox.group', 'topic');
+  if (S.view !== 'inbox') { ctl.focusList = true; go('inbox'); return; }
+  ctl.paintToolbar(); ctl.paintList();
+  ctl.focusTopics();
+};
+
 export default {
-  id: 'inbox', title: '收件箱', sub: '关键词摘要 · 打开即读全文', icon: 'inbox', split: true, softParams: ['sel'],
+  id: 'inbox', title: '收件箱', sub: '按话题归并 · 先看前情提要，再逐项处理', icon: 'inbox', split: true, softParams: ['sel'],
   load: () => ctl.load(),
   render: () => { setActiveSplit(ctl); return ctl.render(); },
   mount: () => { setActiveSplit(ctl); ctl.mount(); },

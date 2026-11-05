@@ -11,6 +11,7 @@ import { icon } from './icons.js';
 import { btn, iconBtn, badge, statusBadge, apvBadge, runBadge, riskBadge, levelBadge, prioIcon, execAvatar, kwChips, kbd, empty, skel,
   kvList, progress, statusIcon, meta, tipAttr, card } from './components.js';
 import { timeline } from './timeline.js';
+import { recapCard, mountRecap } from './recap.js';
 import { META, TERMINAL, digestOf, catLabel, levelName, effLevel, execLabel, purposeLabel, sourceIcon, sourceLabel, recommendedKey,
   isRejectish } from '../domain/vocab.js';
 import { taskAction, decideApproval, patchTask, editTaskDialog, copyText, options, LEVEL_OPTS, PRIO_OPTS } from '../domain/actions.js';
@@ -196,7 +197,7 @@ export function decisionBlock(a, { compact = false } = {}) {
     return h`<div class="decided">${apvBadge(a.status)}<span>决策：<b>${a.decision || '—'}</b></span>${a.decision_note ? h`<span class="muted">备注：${a.decision_note}</span>` : ''}<span class="muted">${a.decided_via || ''} ${a.decided_at ? absTime(a.decided_at) : ''}</span></div>`;
   }
   return h`<div class="decide" data-approval="${a.id}">
-    <label class="field"><span>备注 / 修改意见（可选，随决策一起交给 AI）</span><textarea class="textarea" name="note" rows="${compact ? 2 : 3}" data-dirty-key="note-${a.id}" placeholder="例如：把措辞改得更正式一些再发送"></textarea></label>
+    <label class="field"><span>备注（AI 会记住你写的话）<small class="muted"> 可选 · 修改意见也写在这里，随决策一起交给 AI</small></span><textarea class="textarea" name="note" rows="${compact ? 2 : 3}" data-dirty-key="note-${a.id}" placeholder="例如：把措辞改得更正式一些再发送"></textarea></label>
     ${optionButtons(a)}</div>`;
 }
 ACTS.decide = async (el) => {
@@ -255,6 +256,7 @@ export function taskReader(d, { mode = 'pane' } = {}) {
   const arts = d.artifacts || [];
   const firstPrev = arts.findIndex((a) => a.previewable && ['.md', '.markdown', '.txt', '.json'].includes(a.ext));
   const result = t.result && typeof t.result === 'object' ? t.result : null;
+  const topic = t.topic || d.topic || CACHE.topicOf.get(t.id) || null;
 
   return h`<article class="reader" data-reader="task" data-id="${t.id}">
     <header class="rd-head">
@@ -267,6 +269,7 @@ export function taskReader(d, { mode = 'pane' } = {}) {
     </header>
     ${actionBar(t, { shortcuts: mode === 'pane' })}
     <div class="rd-body">
+      ${recapCard({ id: t.id, topic, ts: t.created_at, extraIds: pendingApv.map((a) => a.id) })}
       ${suggested ? callout('AI 建议', h`${t.level_reason ? md(t.level_reason) : h`<p>分拣后没有自动启动，等你决定是否接受。</p>`}<p class="callout-s">接受后将按 <b>${levelName(e)}</b> 推进：${L.deliverable || ''}</p>`, { icon: 'sparkles' }) : ''}
       ${t.status === 'failed' ? callout('失败原因', h`${t.status_reason ? h`<p>${t.status_reason}</p>` : ''}${lastErr ? h`<pre class="errbox">${lastErr.error}</pre>` : ''}`, { tone: 'crit', icon: 'circle-x' }) : ''}
       ${pendingApv.length ? sec('等你批准', h`${pendingApv.map((a) => h`<div class="apv-inline"><div class="apv-inline-h">${riskBadge(a.risk)}${badge(META.apvKind[a.kind] || a.kind)}${a.action_type ? h`<code>${a.action_type}</code>` : ''}<b>${a.title}</b></div>
@@ -304,6 +307,7 @@ export function approvalReader(d, { mode = 'pane' } = {}) {
   const pending = a.status === 'pending';
   const recKey = recommendedKey(a);
   const recOpt = (a.options || []).find((o) => o.key === recKey);
+  const topic = a.topic || d.topic || (t && t.topic) || CACHE.topicOf.get(a.id) || null;
   return h`<article class="reader" data-reader="approval" data-id="${a.id}">
     <header class="rd-head">
       ${t ? h`<nav class="rd-crumbs"><button type="button" data-act="open-task" data-id="${t.id}"><span class="muted">任务</span> ${cut(t.headline || t.title, 44)}</button></nav>` : ''}
@@ -319,6 +323,7 @@ export function approvalReader(d, { mode = 'pane' } = {}) {
       ${dg.keywords.length ? h`<div class="rd-kws">${kwChips(dg.keywords, { max: 8, act: 'kw-filter' })}</div>` : ''}
     </header>
     <div class="rd-body">
+      ${recapCard({ id: a.id, topic, ts: a.created_at })}
       ${a.recommendation ? callout(recOpt ? `AI 建议：${recOpt.label || recOpt.key}` : 'AI 建议', md(a.recommendation), { icon: 'sparkles' }) : ''}
       ${a.context_md ? sec('背景', md(a.context_md), { icon: 'file-text' }) : ''}
       ${a.payload != null && a.payload !== '' ? sec('批准后将执行的内容', payloadView(a.payload), { icon: 'send', open: a.kind === 'action' }) : ''}
@@ -336,5 +341,6 @@ export function mountReader(root, d) {
     loadEvidence(slot, slot.dataset.task, sig);
   });
   $$('[data-autopreview]', root).forEach((slot) => loadPreviewInto(slot, slot.dataset.previewSlot, slot.dataset.autopreview));
+  mountRecap(root);
 }
 export { recommendedKey };
