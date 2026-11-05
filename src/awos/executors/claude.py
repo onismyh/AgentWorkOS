@@ -21,6 +21,33 @@ from .proc import classify_error, extract_json, resolve_command, run_process, tr
 BARE_PURPOSES = {"triage", "sensor", "context", "plan", "verify", "digest"}
 READ_TOOLS = ["Read", "Glob", "Grep"]
 WEB_TOOLS = ["WebSearch", "WebFetch"]
+# Read-only runs may inspect repos/files through these shell prefixes (everything else is denied by dontAsk).
+# Claude Code on Windows exposes a PowerShell tool next to Bash; both get the same rules.
+_SAFE_PREFIXES = ["cd", "pwd", "ls", "wc", "head", "tail", "du", "file", "Get-ChildItem", "Get-Content", "Select-String",
+                  "Get-Item", "Test-Path", "Get-Location", "Set-Location", "Measure-Object", "Resolve-Path",
+                  "git status", "git --no-optional-locks status", "git diff", "git log", "git show", "git ls-files",
+                  "git rev-parse", "git rev-list", "git blame", "git shortlog", "git describe", "git cat-file",
+                  "git branch --list", "git branch -vv", "git stash list", "git config --get"]
+# Guard rails for every run: git writes and destructive commands go through the Outbox (git_commit / git_push /
+# apply_to_project actions executed by the system after approval), never straight from an agent.
+_DENY_PREFIXES = ["git push", "git commit", "git reset", "git clean", "git checkout", "git rebase", "git merge", "git stash drop",
+                  "git diff --output", "git log --output", "git show --output", "rm -rf", "rm -r", "del /s", "rmdir /s",
+                  "Remove-Item", "Clear-Content", "Format-Volume", "format"]
+
+
+def _rules(prefixes: list[str], exact: tuple[str, ...] = ()) -> list[str]:
+    out = []
+    for p in prefixes:
+        for tool in ("Bash", "PowerShell"):
+            out.append(f"{tool}({p}{'' if p in exact else ':*'})")
+            if p.startswith("git ") and not p.startswith("git --"):
+                # agents usually write `git -C <repo> status`; verified: only the space-star wildcard matches this shape
+                out.append(f"{tool}(git -C * {p[4:]} *)")
+    return out
+
+
+SAFE_SHELL = _rules(_SAFE_PREFIXES, exact=("pwd", "git remote -v")) + ["Bash(git remote -v)", "PowerShell(git remote -v)"]
+DENY_SHELL = _rules(_DENY_PREFIXES)
 
 
 class ClaudeParser:
@@ -96,14 +123,14 @@ class ClaudeExecutor(Executor):
         if spec.output_schema:
             argv += ["--json-schema", json.dumps(spec.output_schema, ensure_ascii=False)]
         allowed = list(READ_TOOLS) + ["Write(./**)", "Edit(./**)"]
-        if spec.sandbox != "read-only":
-            allowed += ["MultiEdit(./**)", "Bash", "NotebookEdit(./**)", "TodoWrite", "Skill"]
+        if spec.sandbox == "read-only":
+            allowed += SAFE_SHELL  # vetted read-only commands so the agent can inspect repos instead of giving up
+        else:
+            allowed += ["MultiEdit(./**)", "Bash", "PowerShell", "NotebookEdit(./**)", "TodoWrite", "Skill"]
         if spec.allow_network:
             allowed += WEB_TOOLS
         argv += ["--allowedTools", " ".join(allowed)]
-        disallowed = [] if spec.allow_network else list(WEB_TOOLS)
-        if spec.sandbox == "read-only":
-            disallowed.append("Bash")
+        disallowed = ([] if spec.allow_network else list(WEB_TOOLS)) + list(DENY_SHELL)
         if disallowed:
             argv += ["--disallowedTools", " ".join(disallowed)]
         for d in spec.add_dirs:

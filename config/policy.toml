@@ -23,7 +23,7 @@ deny_globs = ["**/.ssh/**", "**/.codex/auth.json", "**/.claude/.credentials.json
 
 [actions]
 # Action types that always need human approval regardless of level (mirrors models.SENSITIVE_ACTIONS).
-always_approve = ["send_email", "post_message", "publish", "git_push", "calendar_write", "notion_write", "delete",
+always_approve = ["send_email", "post_message", "publish", "git_push", "git_commit", "calendar_write", "notion_write", "delete",
                   "spend", "apply_to_project", "submit_form", "other"]
 # Approvals expire after this many hours (then the task is handed back to the human).
 expiry_hours = { low = 72, medium = 72, high = 48 }

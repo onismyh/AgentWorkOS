@@ -98,7 +98,7 @@ KINDS = {"todo": "待办事项", "issue": "潜在问题", "opportunity": "项目
 
 # Action types that ALWAYS require human approval through the Outbox, whatever the level.
 SENSITIVE_ACTIONS = {
-    "send_email", "post_message", "publish", "git_push", "calendar_write", "notion_write",
+    "send_email", "post_message", "publish", "git_push", "git_commit", "calendar_write", "notion_write",
     "delete", "spend", "apply_to_project", "submit_form", "other",
 }
 

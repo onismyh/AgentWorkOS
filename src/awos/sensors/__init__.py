@@ -14,7 +14,7 @@ from .base import Sensor, SensorContext, SignalDraft  # noqa: F401
 
 log = logging.getLogger("awos.sensors")
 
-BUILTIN = ("git", "files", "agent_history", "zotero", "inbox_drop", "mailmaster", "gmail", "notion")
+BUILTIN = ("git", "files", "agent_history", "zotero", "inbox_drop", "mailmaster", "github", "gmail", "notion")
 _REGISTRY: dict[str, Sensor] = {}
 _RUNNING: dict[str, threading.Lock] = {}
 _RUNNING_GUARD = threading.Lock()

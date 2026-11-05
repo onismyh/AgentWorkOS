@@ -57,7 +57,8 @@ class DshParser:
         self.texts: list[str] = []
         self.error: str | None = None
         self.session_id: str | None = None
-        self.tokens_in = self.tokens_out = 0
+        self.tokens_in = self.tokens_out = self.tokens_cached = 0
+        self._tools: dict[str, str] = {}
 
     def feed(self, line: str) -> None:
         line = line.strip("\r\n")
@@ -71,18 +72,20 @@ class DshParser:
         if t == "session":
             self.session_id = ev.get("sessionId")
         elif t == "tool_call":
+            self._tools[ev.get("callId", "")] = ev.get("tool", "")
             self.on_event("tool_call", ev.get("tool"), {"input": ev.get("input")})
         elif t == "tool_result":
-            self.on_event("tool_result", ev.get("callId"), {"status": ev.get("status"), "error": ev.get("error"),
-                                                           "result": str(ev.get("result"))[:1500]})
+            self.on_event("tool_result", self._tools.get(ev.get("callId", ""), ev.get("callId")),
+                          {"status": ev.get("status"), "error": ev.get("error"), "result": str(ev.get("result"))[:1500]})
         elif t == "text":
             self.texts.append(ev.get("text") or "")
             self.on_event("message", None, {"text": (ev.get("text") or "")[:4000]})
         elif t == "status":
             usage = ev.get("usage") or {}
-            if ev.get("phase") == "turn_end" and usage:
-                self.tokens_in = int(usage.get("inputTokens") or usage.get("input_tokens") or self.tokens_in)
-                self.tokens_out = int(usage.get("outputTokens") or usage.get("output_tokens") or self.tokens_out)
+            if ev.get("phase") == "step_end" and usage:  # usage is reported per step: sum them
+                self.tokens_in += int(usage.get("inputTokens") or 0)
+                self.tokens_out += int(usage.get("outputTokens") or 0)
+                self.tokens_cached += int(usage.get("cacheReadTokens") or 0)
         elif t == "final":
             self.final = ev
         elif t == "error":
@@ -120,8 +123,13 @@ class DshExecutor(Executor):
         pr = run_process(build_argv(spec, model), cwd=spec.cwd, stdin_text=schema_prompt(spec.prompt, spec.output_schema),
                          env=build_env(spec), timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir,
                          on_stdout=parser.feed, on_stderr=lambda l: None, on_pid=spec.on_pid)
-        base: dict[str, Any] = dict(exit_code=pr.exit_code, final_text=parser.text, tokens_in=parser.tokens_in,
-                                    tokens_out=parser.tokens_out, model=model, session_id=parser.session_id)
+        from ..config import load_config
+        price = load_config().section("executors.dsh")  # USD per million tokens; DSH reports tokens but no cost
+        cost = (parser.tokens_in * float(price.get("usd_per_mtok_in", 0.5)) + parser.tokens_cached * float(price.get("usd_per_mtok_cached", 0.05))
+                + parser.tokens_out * float(price.get("usd_per_mtok_out", 2.0))) / 1e6
+        base: dict[str, Any] = dict(exit_code=pr.exit_code, final_text=parser.text,
+                                    tokens_in=parser.tokens_in + parser.tokens_cached, tokens_out=parser.tokens_out,
+                                    cost_usd=round(cost, 6), model=model or "deepseek-flash", session_id=parser.session_id)
         if pr.cancelled:
             return RunResult(status="cancelled", error="cancelled", error_class="cancelled", **base)
         if pr.timed_out:

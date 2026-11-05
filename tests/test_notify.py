@@ -401,7 +401,8 @@ def test_tampered_tokens_rejected(env):
     forged = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode() + "." + sig
     with pytest.raises(ValueError, match="bad signature"):
         tokens.verify(forged)
-    flipped = tok[:-1] + ("A" if tok[-1] != "A" else "B")
+    # flip a char in the middle of the signature (the last base64 char carries padding bits -> flaky)
+    flipped = tok[:-10] + ("A" if tok[-10] != "A" else "B") + tok[-9:]
     with pytest.raises(ValueError, match="bad signature"):
         tokens.verify(flipped)
     for junk in ["", "abc", "a.b.c", "!!!.???", "x" * 5000, None]:

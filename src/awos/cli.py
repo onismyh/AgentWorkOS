@@ -325,6 +325,19 @@ def cmd_digest(args) -> int:
     return 0
 
 
+def cmd_mail(args) -> int:
+    from . import mailstore
+    if args.action == "search":
+        for h in mailstore.search(args.arg, days=args.days, limit=args.limit):
+            print(f"{h['ref']}  {h['received']}  {h['from'][:30]:30s}  {h['subject']}")
+        return 0
+    m = mailstore.read_mail(args.arg, max_chars=args.chars)
+    print("\n".join([f"主题: {m['subject']}", f"发件人: {m['from']}", f"收件人: {', '.join(m['to'])}",
+                     f"抄送: {', '.join(m['cc'])}", f"时间: {m['received']}", ""]))
+    print(m["body"] if m["body_available"] else "（本地没有这封邮件的正文）")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     from .llm import available_executors
     from .sensors import all_sensors
@@ -367,6 +380,10 @@ def main(argv: list[str] | None = None) -> int:
     tk = sub.add_parser("tick", help="run one scheduler tick"); tk.add_argument("--wait", action="store_true"); tk.set_defaults(fn=cmd_tick)
     c = sub.add_parser("context"); c.add_argument("action", choices=["show", "refresh", "profile"], nargs="?", default="show"); c.set_defaults(fn=cmd_context)
     dg = sub.add_parser("digest"); dg.add_argument("--send", action="store_true"); dg.set_defaults(fn=cmd_digest)
+    ml = sub.add_parser("mail", help="search / show local Mail Master mail (read-only)")
+    ml.add_argument("action", choices=["search", "show"]); ml.add_argument("arg", help="search text or mail ref")
+    ml.add_argument("--days", type=int, default=30); ml.add_argument("--limit", type=int, default=20)
+    ml.add_argument("--chars", type=int, default=6000); ml.set_defaults(fn=cmd_mail)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
     sub.add_parser("backup").set_defaults(fn=cmd_backup)
     args = p.parse_args(argv)

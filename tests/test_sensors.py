@@ -552,3 +552,36 @@ def test_live_connectors(env, request):
     n = NotionSensor().collect(ctx(cfg.section("sensors.notion")))
     print(f"\nLIVE gmail signals={len(g)} notion signals={len(n)}")
     assert isinstance(g, list) and isinstance(n, list)
+
+
+def test_github_sensor_maps_items_and_soft_fails_when_logged_out(monkeypatch):
+    import logging
+    from awos.sensors import github as gh
+    from awos.sensors.base import SensorContext
+
+    ctx = SensorContext(config={"max_items": 5}, cursor={}, log=logging.getLogger("t"))
+    monkeypatch.setattr(gh, "logged_in", lambda: False)
+    import pytest as _pt
+    with _pt.raises(RuntimeError, match="not logged in"):
+        gh.SENSOR.collect(ctx)
+
+    monkeypatch.setattr(gh, "logged_in", lambda: True)
+
+    def fake(*args, **kw):
+        if args[:2] == ("search", "prs") and "--review-requested=@me" in args:
+            return [{"repository": {"nameWithOwner": "o/r"}, "title": "Fix x", "url": "https://github.com/o/r/pull/3", "number": 3,
+                     "updatedAt": "2026-11-04T10:00:00Z", "author": {"login": "bob"}, "isDraft": False}]
+        if args[:2] == ("search", "issues"):
+            return [{"repository": {"nameWithOwner": "o/r"}, "title": "Bug", "url": "u", "number": 9, "updatedAt": "2026-11-03T10:00:00Z",
+                     "author": {"login": "amy"}}]
+        if args[0] == "api":
+            return [{"id": "77", "reason": "mention", "updated_at": "2026-11-05T01:00:00Z", "repository": {"full_name": "o/r"},
+                     "subject": {"title": "Question?", "type": "Issue", "url": "https://api.github.com/repos/o/r/issues/9"}}]
+        return []
+    monkeypatch.setattr(gh, "run_gh", fake)
+    drafts = gh.SENSOR.collect(ctx)
+    titles = [d.title for d in drafts]
+    assert any("待你评审的 PR" in t and "o/r#3" in t for t in titles)
+    assert any("指派给你的 issue" in t for t in titles) and any("通知" in t and "mention" in t for t in titles)
+    assert len({d.fingerprint for d in drafts}) == len(drafts)
+    assert drafts[0].url == "https://github.com/o/r/pull/3"

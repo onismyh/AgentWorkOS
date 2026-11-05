@@ -15,6 +15,7 @@ from ..models import LEVELS, TaskStatus
 
 log = logging.getLogger("awos.worker")
 
+READONLY_ROUTE_CATEGORIES = {"dev", "research", "learning", "data", "pm"}
 SETTLED = {"done", "review", "waiting_user", "failed", "cancelled", "dismissed"}
 
 
@@ -156,10 +157,18 @@ def _register_deliverables(task: dict, run_id: str, workspace: Path, out: dict) 
 def _verify(task: dict, workspace: Path, out: dict, executed_by: str) -> dict | None:
     from ..llm import pick_executor, run_agent
 
-    other = "claude" if executed_by == "codex" else "codex"
-    try:
-        ex = pick_executor("verify", preferred=other)
-    except RuntimeError:
+    ex = None
+    sensitive = (workspace / "inputs" / "mail").exists()  # mail-derived deliverables never go to the DeepSeek verifiers
+    for cand in ("dsh", "pi", "codex", "claude"):  # cheapest independent opinion first, never the executor itself
+        if cand == executed_by or (sensitive and cand in ("dsh", "pi")):
+            continue
+        try:
+            if pick_executor("verify", preferred=cand) == cand:
+                ex = cand
+                break
+        except RuntimeError:
+            break
+    if ex is None:
         return None
     deliv = "\n".join(f"- `{d.get('path')}`（{d.get('title')}）" for d in out.get("deliverables") or []) or "（无文件交付物）"
     prompt = prompts.VERIFY.format(title=task["title"], acceptance=task.get("acceptance") or "（未给出，按常识判断质量）",
@@ -211,6 +220,14 @@ def _process(task: dict, owner: str) -> None:
     if task.get("workspace") != str(workspace):
         repo.update_task(task["id"], workspace=str(workspace))
     extra, extra_dirs = _extra_context(task)
+    n_mail = 0
+    try:
+        from .. import mailstore
+        mail_block, n_mail = mailstore.export_for_task(task, workspace)
+        if mail_block:
+            extra = "\n\n".join(x for x in (extra, mail_block) if x)
+    except Exception:
+        log.exception("mail export failed for %s", task["id"])
     readable = ", ".join(f"`{p}`" for p in dec.readable) or "（无）"
     prompt = prompts.EXECUTE.format(
         context=context_brief(), task_id=task["id"], title=task["title"], category=task["category"], kind=task["kind"],
@@ -219,8 +236,13 @@ def _process(task: dict, owner: str) -> None:
         description=task.get("description") or task["title"], extra=extra, workspace=str(workspace), readable=readable,
         level_instructions=prompts.LEVEL_INSTRUCTIONS[dec.level], security=prompts.SECURITY_RULES)
     preferred = task.get("executor") if task.get("executor") in ("codex", "claude", "pi", "dsh") else None
+    if n_mail and preferred in ("pi", "dsh"):
+        preferred = None  # mail bodies only go to the executors the user already trusts with mail (codex/claude)
+    route = task["category"]
+    if preferred is None and not n_mail and dec.sandbox == "read-only" and task["category"] in READONLY_ROUTE_CATEGORIES:
+        route = "readonly"  # analysis-only work on non-personal topics goes to the cheap DeepSeek executors first
     try:
-        executor = pick_executor(task["category"], preferred=preferred)
+        executor = pick_executor(route, preferred=preferred)
     except RuntimeError as e:
         return fail_or_retry(task, owner, str(e), "transient")
     remaining = (float(load_config().get("budget.per_task_usd", 3.0)) + float(meta.get("budget_bonus", 0))

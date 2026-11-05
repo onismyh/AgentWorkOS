@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -238,6 +239,8 @@ def execute_action(approval: dict) -> dict:
             result = _apply_to_project(approval, payload)
         elif atype == "git_push":
             result = _git_push(payload)
+        elif atype == "git_commit":
+            result = _git_commit(payload)
         elif atype == "delete":
             result = _soft_delete(payload)
         elif atype == "spend":
@@ -295,13 +298,55 @@ def _apply_to_project(approval: dict, payload: dict) -> dict:
     return {"done": True, "details": f"已写入 {len(done)} 个文件（原文件已备份）", "files": done}
 
 
+def _gh_exe() -> Path | None:
+    p = load_config().root / "runtime" / "gh" / "bin" / "gh.exe"
+    return p if p.exists() else None
+
+
+def _git(repo_dir: Path, *args: str, timeout: int = 300, extra: list[str] | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *(extra or []), "-C", str(repo_dir), *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout, creationflags=0x08000000)
+
+
+_NEVER_COMMIT = re.compile(r"(^|/)(\.env[^/]*|[^/]*\.(pem|key|pfx|p12)|id_rsa[^/]*|secrets?[^/]*|__pycache__|[^/]*\.pyc)(/|$)", re.I)
+
+
+def _git_commit(payload: dict) -> dict:
+    """Commit exactly the listed paths (never `add -A`) in a repo under the user's work roots."""
+    repo_dir = Path(payload["repo"]).resolve()
+    if not policy.writable_destination(repo_dir):
+        raise RuntimeError(f"repo not in allowed roots: {repo_dir}")
+    if not (repo_dir / ".git").exists():
+        raise RuntimeError(f"not a git repository: {repo_dir}")
+    paths = [str(p) for p in (payload.get("paths") or [])]
+    message = (payload.get("message") or "").strip()
+    if not paths or not message:
+        raise RuntimeError("git_commit needs an explicit non-empty 'paths' list and a 'message'")
+    for p in paths:
+        full = (repo_dir / p).resolve()
+        if full != repo_dir and repo_dir not in full.parents:
+            raise RuntimeError(f"path escapes the repository: {p}")
+        if _NEVER_COMMIT.search(p.replace("\\", "/")):
+            raise RuntimeError(f"refusing to commit a credential/cache-like path: {p}")
+    add = _git(repo_dir, "add", "-A", "--", *paths)  # -A so deletions of the listed paths are staged too
+    if add.returncode != 0:
+        return {"done": False, "details": (add.stdout + add.stderr)[-1500:]}
+    commit = _git(repo_dir, "commit", "-m", message, "--", *paths)
+    sha = _git(repo_dir, "rev-parse", "--short", "HEAD").stdout.strip()
+    return {"done": commit.returncode == 0, "details": (commit.stdout + commit.stderr)[-1500:], "commit": sha}
+
+
 def _git_push(payload: dict) -> dict:
     repo_dir = Path(payload["repo"])
     if not policy.writable_destination(repo_dir):
         raise RuntimeError(f"repo not in allowed roots: {repo_dir}")
-    args = ["git", "-C", str(repo_dir), "push"] + ([payload["remote"]] if payload.get("remote") else []) + \
-           ([payload["branch"]] if payload.get("branch") else [])
-    p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    extra: list[str] = []
+    gh = _gh_exe()
+    if gh is not None:  # per-invocation credential helper: no change to the user's global git config
+        extra = ["-c", "credential.https://github.com.helper=", "-c",
+                 f'credential.https://github.com.helper=!"{gh.as_posix()}" auth git-credential']
+    args = ["push"] + ([payload["remote"]] if payload.get("remote") else []) + ([payload["branch"]] if payload.get("branch") else [])
+    p = _git(repo_dir, *args, extra=extra)
     return {"done": p.returncode == 0, "details": (p.stdout + p.stderr)[-1500:]}
 
 

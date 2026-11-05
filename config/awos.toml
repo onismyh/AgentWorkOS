@@ -45,22 +45,30 @@ timeout_seconds = 1500
 max_budget_usd_per_run = 1.5
 
 [executors.pi]
-enabled = false                        # enabled by scripts/install-runtimes after verification
+enabled = true
 command = "pi"
+model = "deepseek/deepseek-v4-pro"
 max_concurrent = 1
 timeout_seconds = 1500
 
 [executors.dsh]
-enabled = false
+enabled = true
+# DSH reports tokens only; these are ESTIMATED prices (USD per million tokens) used for budget accounting
+usd_per_mtok_in = 0.5
+usd_per_mtok_cached = 0.05
+usd_per_mtok_out = 2.0
 command = "dsh"
 max_concurrent = 1
 timeout_seconds = 1500
 
 [routing]
+# readonly: L1/L2 analysis on non-personal categories (dev/research/learning/data/pm) -> cheap DeepSeek executors first
+readonly = ["dsh", "pi", "codex", "claude"]
+verify = ["dsh", "pi", "codex", "claude"]
 # category -> preferred executor order (first enabled wins). Planner/triage may override per task.
 triage = ["claude", "codex"]
 plan = ["codex", "claude"]
-dev = ["codex", "pi", "claude"]
+dev = ["codex", "pi", "dsh", "claude"]
 research = ["codex", "claude"]
 writing = ["claude", "codex"]
 doc = ["claude", "codex"]
@@ -138,6 +146,11 @@ active_hours = ["09:00", "01:30"]
 recent_days = 3
 ahead_days = 14
 timeout_s = 600
+
+[sensors.github]
+enabled = true
+interval_minutes = 120               # needs `gh auth login` once; soft-fails (backs off) until then
+max_items = 20
 
 [sensors.gcal]
 enabled = false                        # Google Calendar is empty for this user; Notion holds the schedule

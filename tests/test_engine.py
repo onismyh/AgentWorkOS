@@ -354,3 +354,73 @@ def test_cli_style_approval_is_picked_up_by_scheduler_tick(env, monkeypatch):
             break
         time.sleep(0.1)
     assert repo.get_approval(pend["id"])["status"] == "executed" and (proj / "n.md").read_text(encoding="utf-8") == "hi"
+
+
+def test_mail_tasks_never_reach_deepseek_executors(env, monkeypatch, tmp_path):
+    """A task built from mail signals gets its mails exported and is kept off pi/dsh (incl. the verifier)."""
+    from awos import mailstore, repo
+    from awos.engine.actions import add_manual_task
+    fake = env["fake"]
+    seen = {}
+    monkeypatch.setattr(mailstore, "export_for_task", lambda task, ws: ("## 相关邮件原文\n- x", 1))
+    tid = add_manual_task("回复邮件", "d", level=3, category="comms", executor="dsh")
+
+    import awos.llm as llm
+    real_pick = llm.pick_executor
+
+    def spy(route, preferred=None):
+        seen.setdefault("calls", []).append((route, preferred))
+        return real_pick(route, preferred=preferred)
+    monkeypatch.setattr(llm, "pick_executor", spy)
+    fake.push("execute", lambda spec: exec_result(summary="ok") if "相关邮件原文" in spec.prompt else exec_result(summary="NO MAIL BLOCK"))
+    drain(4)
+    assert repo.get_task(tid)["summary"] == "ok"
+    assert all(p != "dsh" for _, p in seen["calls"])
+
+
+def _git_repo(path: Path) -> None:
+    import subprocess
+    for args in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+    (path / "a.txt").write_text("1", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True, capture_output=True)
+
+
+def _approve_action(atype: str, payload: dict) -> dict:
+    from awos import repo
+    from awos.hitl.outbox import payload_hash
+    aid = repo.create_approval(title=atype, kind="action", action_type=atype,
+                               options=[{"key": "approve", "label": "ok"}, {"key": "reject", "label": "no"}],
+                               payload={**payload, "_hash": payload_hash(payload)})
+    repo.decide_approval(aid, "approve")
+    from awos.hitl.outbox import execute_action
+    execute_action(repo.get_approval(aid))
+    return repo.get_approval(aid)
+
+
+def test_git_commit_action_commits_only_listed_paths(env):
+    import subprocess
+    r = env["tmp"] / "gitproj"; r.mkdir()
+    _git_repo(r)
+    (r / "a.txt").write_text("2", encoding="utf-8")
+    (r / "b.txt").write_text("new", encoding="utf-8")       # not listed -> must stay uncommitted
+    a = _approve_action("git_commit", {"repo": str(r), "paths": ["a.txt"], "message": "update a"})
+    assert a["status"] == "executed", a["result"]
+    log = subprocess.run(["git", "-C", str(r), "log", "--oneline"], capture_output=True, text=True).stdout
+    assert "update a" in log
+    status = subprocess.run(["git", "-C", str(r), "status", "--short"], capture_output=True, text=True).stdout
+    assert "b.txt" in status and "a.txt" not in status
+
+
+def test_git_commit_action_refuses_dangerous_inputs(env):
+    r = env["tmp"] / "gitproj2"; r.mkdir()
+    _git_repo(r)
+    (r / ".env").write_text("SECRET=1", encoding="utf-8")
+    for payload in ({"repo": str(r), "paths": [".env"], "message": "m"},
+                    {"repo": str(r), "paths": ["../outside.txt"], "message": "m"},
+                    {"repo": str(r), "paths": [], "message": "m"},
+                    {"repo": str(r), "paths": ["a.txt"], "message": ""},
+                    {"repo": str(env["tmp"].parent), "paths": ["a.txt"], "message": "m"}):
+        a = _approve_action("git_commit", payload)
+        assert a["status"] == "failed", payload

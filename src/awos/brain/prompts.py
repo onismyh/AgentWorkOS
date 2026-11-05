@@ -121,6 +121,7 @@ EXECUTE = """\
 - 完成后要**自我验证**（运行代码/测试、检查文件能否打开、核对数据、对照验收标准逐条检查），把结果写进 `verification`。
 - 需要用户拍板的事项写进 `decisions_needed`（给出 2–4 个选项和你的推荐）。
 - 需要对外执行的动作写进 `proposed_actions`，`payload_json` 写成 JSON 字符串，内容要精确到可以直接执行（例如邮件的收件人、主题、正文全文；apply_to_project 写 {{"files":[{{"src":"相对工作目录的路径","dest":"用户目录里的绝对路径"}}]}}）。
+- 查看用户的 git 仓库时直接用 shell：`git -C "<仓库绝对路径>" status --short`、`git -C "<路径>" diff --stat`、`git -C "<路径>" log -n 20 --oneline`（不要用 `cd ...; git ...`，会被拒绝）。git 的写操作（commit、push、checkout、reset）你自己不能执行：提议 `git_commit`（payload：{{"repo":"仓库绝对路径","paths":["要提交的相对路径，不要 git add -A"],"message":"提交说明"}}）或 `git_push`（payload：{{"repo":"仓库绝对路径","remote":"origin","branch":"分支名"}}），用户批准后由系统代为执行。提交前先用上面的只读命令确认改动内容，不要提交 __pycache__、*.pyc、日志、密钥、大体积中间产物。
 - 如果发现任务太大，需要拆分成并行子任务，就在 `subtasks` 里给出拆分（status 填 partial），系统会创建子任务并行执行，最后再交还给你汇总。
 - 发现了用户上下文的新信息（项目进展、截止日期、偏好）就写进 `context_updates`。
 - `summary` 用中文 markdown 写给用户看：做了什么、结论是什么、下一步是什么，控制在 25 行以内。
