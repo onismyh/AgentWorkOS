@@ -102,3 +102,14 @@
 ## ADR-012 Pi / DSH 启用，使用用户的 DeepSeek key（2026-11-05）
 
 **决策**：key 从用户指定的桌面文件复制到 gitignored 的 `var/secrets.toml`（`[pi.env]`、`[dsh.env]`），不进 git、不打印。Pi 默认模型 `deepseek/deepseek-v4-pro`，DSH 默认 `deepseek-flash`。用途：独立验证（与执行器不同模型族）和非个人类别（dev/research/learning/data/pm）的只读分析优先走它们。DSH 只给 token 不给费用，按 `[executors.dsh] usd_per_mtok_*` 估算计入预算。
+
+## ADR-013 预算放开 + 执行器自动移交（handoff）（2026-11-05）
+
+**背景**：用户要求"把预算再放开一点，部分任务可以 handoff 给 pi、dsh 和 codex"。原先执行器失败（预算不足、额度被占、临时故障）时，任务要么等、要么失败、要么来问用户。
+
+**决策**：
+- 预算：每日 $8 → $15，单任务 $3 → $5，Codex 每日 60 → 90 次；并发 3 → 4，全局 agent 进程 6，Pi/DSH 各 2 并发。Claude、Pi、DSH 共用每日美元预算，Codex 按次数计。
+- 自动移交：worker 按路由得到有序候选执行器，当前执行器因 budget / capacity / transient 失败时当场交给下一个（新执行器会收到"上一个执行器中断，先检查工作目录里的成果再继续"的说明）；permanent 错误不移交。移交写入审计事件 handoff 和 task.meta.handoffs，并出现在话题的前情提要里。所有候选都失败才走原来的失败/预算审批流程。
+- 分流：只读（L1/L2）分析对 dev/research/learning/data/pm/doc/writing/system/other 先走 dsh → pi → codex → claude；写入级（L3+）对 dev/research/learning/data/pm/system/other 先走 codex → dsh → claude；写作产出、求职、沟通、行政仍走各自路由。
+- 安全边界不变：来源是邮件的任务只给 codex/claude；Pi 没有自带沙箱，只做只读工作（executors.pi.allow_write 默认 false）；对外动作仍全部进 Outbox。
+- 测试隔离：测试环境只允许名字以 fake 开头的执行器（AWOS_ONLY_FAKE_EXECUTORS），任何测试都不能触达真实 agent。

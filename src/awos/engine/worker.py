@@ -11,11 +11,41 @@ from ..brain import planner, policy, prompts
 from ..brain.context import apply_updates, context_brief
 from ..brain.schemas import EXECUTE_SCHEMA, VERIFY_SCHEMA
 from ..config import load_config
+from ..executors.base import RunResult
 from ..models import LEVELS, TaskStatus
 
 log = logging.getLogger("awos.worker")
 
-READONLY_ROUTE_CATEGORIES = {"dev", "research", "learning", "data", "pm"}
+HANDOFF_CLASSES = {"budget", "capacity", "transient"}
+DEFAULT_CHEAP_READONLY = ("dev", "research", "learning", "data", "pm", "doc", "writing", "system", "other")
+DEFAULT_CHEAP_WRITE = ("dev", "research", "learning", "data", "pm", "system", "other")
+REASON_ZH = {"budget": "预算不足", "capacity": "预算额度被占用", "transient": "临时故障"}
+
+
+def choose_route(task: dict, sandbox: str, n_mail: int, preferred: str | None) -> str:
+    """Routing key for a task: analysis (read-only) and, for non-personal categories, write-level work too goes to the
+    cheap executors first (config routing.readonly / routing.write); everything else follows its category."""
+    cfg = load_config()
+    if preferred is None and not n_mail:
+        cheap = cfg.get("routing.cheap_readonly_categories" if sandbox == "read-only" else "routing.cheap_write_categories",
+                        DEFAULT_CHEAP_READONLY if sandbox == "read-only" else DEFAULT_CHEAP_WRITE)
+        if task["category"] in cheap:
+            return "readonly" if sandbox == "read-only" else "write"
+    return task["category"]
+
+
+def filter_candidates(candidates: list[str], *, sandbox: str, n_mail: int) -> list[str]:
+    """Who may be handed this task: mail content stays with the executors the user trusts with mail (codex/claude), and
+    Pi (no sandbox of its own) only gets read-only work unless executors.pi.allow_write is on."""
+    cfg = load_config()
+    out = []
+    for name in candidates:
+        if n_mail and name in ("pi", "dsh"):
+            continue
+        if name == "pi" and sandbox != "read-only" and not cfg.get("executors.pi.allow_write", False):
+            continue
+        out.append(name)
+    return out
 SETTLED = {"done", "review", "waiting_user", "failed", "cancelled", "dismissed"}
 
 
@@ -204,7 +234,7 @@ def process_task(task_id: str, owner: str) -> None:
 
 def _process(task: dict, owner: str) -> None:
     from ..hitl import outbox
-    from ..llm import pick_executor, run_agent
+    from ..llm import executor_candidates, run_agent
 
     meta = task.get("meta") or {}
     dec = policy.decide(task)
@@ -249,23 +279,43 @@ def _process(task: dict, owner: str) -> None:
     preferred = task.get("executor") if task.get("executor") in ("codex", "claude", "pi", "dsh") else None
     if n_mail and preferred in ("pi", "dsh"):
         preferred = None  # mail bodies only go to the executors the user already trusts with mail (codex/claude)
-    route = task["category"]
-    if preferred is None and not n_mail and dec.sandbox == "read-only" and task["category"] in READONLY_ROUTE_CATEGORIES:
-        route = "readonly"  # analysis-only work on non-personal topics goes to the cheap DeepSeek executors first
-    try:
-        executor = pick_executor(route, preferred=preferred)
-    except RuntimeError as e:
-        return fail_or_retry(task, owner, str(e), "transient")
+    route = choose_route(task, dec.sandbox, n_mail, preferred)
+    candidates = filter_candidates(executor_candidates(route, preferred), sandbox=dec.sandbox, n_mail=n_mail)
+    if not candidates:
+        return fail_or_retry(task, owner, f"no eligible executor for route {route!r}", "transient")
     remaining = (float(load_config().get("budget.per_task_usd", 3.0)) + float(meta.get("budget_bonus", 0))
                  - float(task.get("cost_usd") or 0))
-    if executor != "codex" and remaining <= 0.05:
-        return fail_or_retry(task, owner, f"per-task budget exhausted (${task.get('cost_usd'):.2f})", "budget")
-    run_id, res = run_agent(prompt, purpose="execute", executor=executor, task_id=task["id"], attempt=task["attempts"],
-                            cwd=workspace, sandbox=dec.sandbox, output_schema=EXECUTE_SCHEMA,
-                            add_dirs=dec.readable + extra_dirs, allow_network=True, allow_connectors=False,
-                            max_budget_usd=max(0.1, min(remaining, float(load_config().get("executors.claude.max_budget_usd_per_run", 1.5)))))
-    if res.status != "succeeded" or not res.structured:
-        return fail_or_retry(task, owner, res.error or "no structured result", res.error_class or "transient", run_id)
+    run_cap = float(load_config().get("executors.claude.max_budget_usd_per_run", 1.5))
+    # Run on the first executor that can take it; if it fails for a reason another executor may not share (budget, busy
+    # budget reservations, transient errors), hand the task to the next one right away instead of waiting or asking.
+    handoffs: list[dict] = list(meta.get("handoffs") or [])
+    run_prompt, res, run_id, executor = prompt, None, None, None
+    for idx, executor in enumerate(candidates):
+        if executor != "codex" and remaining <= 0.05:   # pay-per-use executors share the per-task budget; codex does not
+            res = RunResult(status="failed", error=f"per-task budget exhausted (${task.get('cost_usd'):.2f})", error_class="budget")
+            run_id = run_id or None
+            if idx + 1 < len(candidates):
+                continue
+            break
+        run_id, res = run_agent(run_prompt, purpose="execute", executor=executor, task_id=task["id"], attempt=task["attempts"],
+                                cwd=workspace, sandbox=dec.sandbox, output_schema=EXECUTE_SCHEMA,
+                                add_dirs=dec.readable + extra_dirs, allow_network=True, allow_connectors=False,
+                                max_budget_usd=max(0.1, min(remaining, run_cap)))
+        if res.status == "succeeded" and res.structured:
+            break
+        if idx + 1 < len(candidates) and (res.error_class or "transient") in HANDOFF_CLASSES and _still_mine(task["id"], owner):
+            nxt = candidates[idx + 1]
+            info = {"from": executor, "to": nxt, "reason": res.error_class, "error": (res.error or "")[:160], "run": run_id}
+            handoffs.append({**info, "ts": db.utcnow()})
+            repo.log_event("task", task["id"], "handoff", info, actor="system")
+            repo.merge_task_meta(task["id"], handoffs=handoffs[-10:])
+            run_prompt = (prompt + f"\n\n## 执行器切换\n上一个执行器 {executor} 因{REASON_ZH.get(res.error_class, '故障')}中断，"
+                          f"现在由你（{nxt}）接手。工作目录 `{workspace}` 里可能已有它留下的部分成果：先检查，在此基础上继续，不要从头重做。")
+            continue
+        break
+    if res is None or res.status != "succeeded" or not res.structured:
+        return fail_or_retry(task, owner, (res.error if res else None) or "no structured result",
+                             (res.error_class if res else None) or "transient", run_id)
     out = res.structured
     if not _still_mine(task["id"], owner):
         return

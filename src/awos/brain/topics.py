@@ -289,6 +289,9 @@ def history(key: str, limit: int = 40) -> list[dict]:
                     add(ts, "user", f"你接受了建议「{name(eid)}」")
             elif ty == "retried" and actor == "user":
                 add(ts, "user", f"你让 AI 重试「{name(eid)}」")
+            elif ty == "handoff" and is_root:
+                why = {"budget": "预算不足", "capacity": "预算额度被占用", "transient": "临时故障"}.get(d.get("reason"), "故障")
+                add(ts, "system", f"「{name(eid)}」从 {d.get('from')} 交给 {d.get('to')} 继续做（{why}）")
         elif et == "approval" and eid in approvals:
             a = approvals[eid]
             if ty == "created":

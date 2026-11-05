@@ -38,6 +38,7 @@ from ..db import loads, parse_ts, q, q1, utcnow
 from ..engine import actions
 from ..models import CATEGORIES, EXECUTORS, KINDS, LEVELS, SENSITIVE_ACTIONS, TRANSITIONS, ApprovalStatus, RunStatus, TaskStatus
 from ..repo import InvalidTransition
+from ..timeutil import local_today, tz
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 STARTED_AT = time.time()
@@ -228,7 +229,8 @@ def _duration(start: str | None, end: str | None, running: bool = False) -> floa
 
 
 def _local_midnight_utc() -> str:
-    return _iso(datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0))
+    """Start of the user's (Beijing) day as a UTC timestamp."""
+    return _iso(datetime.combine(local_today(), datetime.min.time(), tzinfo=tz()))
 
 
 def _cut(s: Any, n: int) -> Any:
@@ -498,7 +500,7 @@ def _sensors(include_cursor: bool = False) -> list[dict]:
 
 
 def _cost_days(days: int = 14) -> dict:
-    start = datetime.now().date() - timedelta(days=days - 1)
+    start = local_today() - timedelta(days=days - 1)   # the ledger's `day` is Beijing time, not the (UTC-4) system clock
     rows = q("SELECT day, executor, COALESCE(SUM(cost_usd), 0) usd, COUNT(*) runs, COALESCE(SUM(tokens_in + tokens_out), 0) tokens "
              "FROM cost_ledger WHERE day >= ? GROUP BY day, executor", (start.isoformat(),))
     order = {name: i for i, name in enumerate(EXECUTORS)}

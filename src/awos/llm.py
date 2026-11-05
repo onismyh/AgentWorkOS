@@ -6,6 +6,7 @@ It creates a `runs` row, writes prompt + raw logs under var/runs/<run_id>/, stre
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -54,6 +55,8 @@ def cancel_all_runs() -> int:
 
 
 def executor_enabled(name: str) -> bool:
+    if os.environ.get("AWOS_ONLY_FAKE_EXECUTORS") == "1" and not name.startswith("fake"):
+        return False  # test isolation: no test may reach a real agent (and spend real money / touch real data)
     return bool(load_config().get(f"executors.{name}.enabled", False))
 
 
@@ -98,16 +101,21 @@ def _available(name: str) -> tuple[bool, str]:
     return ok, why
 
 
-def pick_executor(route: str, preferred: str | None = None) -> str:
-    """Choose an executor for a routing key (category or purpose), honouring an explicit preference."""
+def executor_candidates(route: str, preferred: str | None = None) -> list[str]:
+    """Enabled + available executors for a routing key, in preference order (the order used for hand-offs)."""
     cfg = load_config()
     order = list(cfg.get(f"routing.{route}", None) or cfg.get("routing.other", ["claude", "codex"]))
     if preferred:
         order = [preferred] + [o for o in order if o != preferred]
-    for name in order:
-        if executor_enabled(name) and _available(name)[0]:
-            return name
-    raise RuntimeError(f"no available executor for route {route!r} (tried {order})")
+    return [name for name in order if executor_enabled(name) and _available(name)[0]]
+
+
+def pick_executor(route: str, preferred: str | None = None) -> str:
+    """Choose an executor for a routing key (category or purpose), honouring an explicit preference."""
+    cands = executor_candidates(route, preferred)
+    if not cands:
+        raise RuntimeError(f"no available executor for route {route!r}")
+    return cands[0]
 
 
 RESERVE_WAIT_S = 300

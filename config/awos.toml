@@ -22,7 +22,8 @@ node_runtime = "runtime/node"          # portable Node >= 22.19 for pi / dsh
 [scheduler]
 tick_seconds = 60                     # scheduler wake-up; was 15, slowed on user request
 lease_seconds = 300                    # task lease; heartbeat renews it
-max_concurrent_runs = 3
+max_concurrent_runs = 4                # was 3: more cheap executors to hand work to
+max_agent_processes = 6                # global cap on agent subprocesses across all executors
 quiet_hours = ["01:30", "09:30"]       # Beijing time; user works ~12:00-24:00. Only risk=high notifies here
 autostart_max_level = 5                # tasks up to this level start automatically after triage
 autostart_min_priority = 3             # P0..P3 all eligible
@@ -48,7 +49,8 @@ max_budget_usd_per_run = 1.5
 enabled = true
 command = "pi"
 model = "deepseek/deepseek-v4-pro"
-max_concurrent = 1
+max_concurrent = 2
+allow_write = false                    # Pi has no sandbox/permission system: read-only work only (analysis, verification)
 timeout_seconds = 1500
 
 [executors.dsh]
@@ -58,12 +60,17 @@ usd_per_mtok_in = 0.5
 usd_per_mtok_cached = 0.05
 usd_per_mtok_out = 2.0
 command = "dsh"
-max_concurrent = 1
+max_concurrent = 2
 timeout_seconds = 1500
 
 [routing]
 # readonly: L1/L2 analysis on non-personal categories (dev/research/learning/data/pm) -> cheap DeepSeek executors first
 readonly = ["dsh", "pi", "codex", "claude"]
+# write: L3-L5 work in non-personal categories. Pi has no sandbox of its own, so it is not here (see executors.pi.allow_write).
+write = ["codex", "dsh", "claude"]
+# Which categories use the cheap routes above (hand-off order = list order). Mail-derived tasks never go to pi/dsh.
+cheap_readonly_categories = ["dev", "research", "learning", "data", "pm", "doc", "writing", "system", "other"]
+cheap_write_categories = ["dev", "research", "learning", "data", "pm", "system", "other"]
 verify = ["dsh", "pi", "codex", "claude"]
 # topic recaps contain the user's mail/repo context: only the executors already trusted with it (Codex is free per run)
 brief = ["codex", "claude"]
@@ -87,9 +94,9 @@ system = ["codex", "claude"]
 other = ["codex", "claude"]
 
 [budget]
-daily_usd = 8.0                        # pay-per-use executors (claude); hard stop when exceeded
-per_task_usd = 3.0
-codex_daily_runs = 60                  # subscription executor: cap number of runs/day
+daily_usd = 15.0                       # pay-per-use executors (claude, pi, dsh share it); hard stop when exceeded. Raised from 8 on the user's request
+per_task_usd = 5.0                     # was 3
+codex_daily_runs = 90                  # subscription executor: cap number of runs/day (was 60)
 
 [sensors.git]
 enabled = true

@@ -6,6 +6,8 @@ import os
 # No test may let the scheduler run a real sensor (GitHub, Gmail, Notion, mail, ...): scheduled collection is switched
 # off globally; tests that exercise a sensor call run_sensor()/collect() directly with fakes.
 os.environ["AWOS_DISABLE_SENSORS"] = "1"
+# Likewise no test may run a real executor (codex / claude / pi / dsh): only executors named fake* are ever enabled.
+os.environ["AWOS_ONLY_FAKE_EXECUTORS"] = "1"
 os.environ.setdefault("AWOS_NOTIFY_DISABLE", "1")
 
 

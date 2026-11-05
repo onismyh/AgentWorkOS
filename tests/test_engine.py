@@ -10,7 +10,7 @@ import pytest
 
 
 ROUTES = ["triage", "plan", "verify", "context", "dev", "research", "writing", "doc", "data", "pm", "schedule", "comms",
-          "admin", "career", "learning", "system", "other"]
+          "admin", "career", "learning", "system", "other", "readonly", "write", "brief"]
 
 
 @pytest.fixture()
@@ -431,21 +431,24 @@ def test_git_commit_action_refuses_dangerous_inputs(env):
 def test_budget_reservations_wait_but_real_overspend_fails(env, monkeypatch):
     import awos.llm as llm
     from awos import repo
-    repo.record_cost(None, "fake", None, 5.0)                       # real spend so far: $5 of the default $8
+    from awos.config import load_config
+    cap = float(load_config().get("budget.daily_usd"))               # follow the configured daily cap
+    repo.record_cost(None, "fake", None, cap - 3.0)                 # real spend so far: $3 below the cap
     llm._reserved["other"], llm._inflight["other"] = 2.5, "fake"    # another run is in flight, reserving $2.5
     assert llm.reserve_budget("me", "fake", 1.0)[0] == "wait"       # fits the day, just not next to the other run
     llm.release_budget("other")
     assert llm.reserve_budget("me", "fake", 1.0)[0] == "ok"
     llm.release_budget("me")
-    repo.record_cost(None, "fake", None, 2.5)                       # real spend $7.5: one more $1 run would exceed $8
+    repo.record_cost(None, "fake", None, 2.5)                       # real spend now cap-0.5: one more $1 run would exceed the cap
     assert llm.reserve_budget("me2", "fake", 1.0)[0] == "budget"
 
 
 def test_run_agent_gives_transient_not_budget_error_when_only_reservations_block(env, monkeypatch):
     import awos.llm as llm
+    from awos.config import load_config
     monkeypatch.setattr(llm, "RESERVE_WAIT_S", 0.2)
     monkeypatch.setattr(llm, "RESERVE_POLL_S", 0.05)
-    llm._reserved["other"], llm._inflight["other"] = 7.9, "fake"
+    llm._reserved["other"], llm._inflight["other"] = float(load_config().get("budget.daily_usd")) - 0.1, "fake"
     try:
         run_id, res = llm.run_agent("x", purpose="execute", executor="fake")
     finally:
