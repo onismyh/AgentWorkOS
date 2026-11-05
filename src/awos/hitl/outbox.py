@@ -7,7 +7,7 @@ import logging
 import shutil
 import subprocess
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,7 @@ def payload_hash(payload: Any) -> str:
 
 
 def _expiry(risk: str) -> str:
-    return (datetime.utcnow() + timedelta(hours=policy.approval_expiry_hours(risk))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (datetime.now(timezone.utc) + timedelta(hours=policy.approval_expiry_hours(risk))).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_payload(raw: Any) -> dict:

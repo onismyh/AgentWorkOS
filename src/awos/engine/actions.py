@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .. import repo
@@ -97,7 +97,7 @@ def dismiss_task(task_id: str, actor: str = "user", reason: str | None = None) -
 
 
 def snooze_task(task_id: str, hours: float = 24, actor: str = "user") -> None:
-    until = (datetime.utcnow() + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    until = (datetime.now(timezone.utc) + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     cancel_task_runs(task_id)
     repo.update_task(task_id, actor=actor, snoozed_until=until)
     repo.set_task_status(task_id, TaskStatus.SNOOZED, f"snoozed until {until}", actor=actor, force=True)

@@ -5,7 +5,7 @@ import ctypes
 import logging
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .. import repo
 from ..config import load_config
@@ -55,7 +55,7 @@ def recover_task(task: dict, reason: str) -> None:
         repo.set_task_status(t["id"], TaskStatus.FAILED, f"{reason}; attempts exhausted")
         return
     seq = load_config().get("scheduler.retry_backoff_seconds", [60, 300, 1800])
-    nxt = (datetime.utcnow() + timedelta(seconds=int(seq[0]))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    nxt = (datetime.now(timezone.utc) + timedelta(seconds=int(seq[0]))).strftime("%Y-%m-%dT%H:%M:%SZ")
     repo.set_task_status(t["id"], TaskStatus.READY, f"recovered: {reason}", extra={"next_attempt_at": nxt})
     repo.log_event("task", t["id"], "recovered", {"reason": reason})
 

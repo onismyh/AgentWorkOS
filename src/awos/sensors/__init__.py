@@ -4,7 +4,7 @@ from __future__ import annotations
 import importlib
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .. import repo
 from ..config import load_config
@@ -95,7 +95,7 @@ def _run_sensor(name: str) -> dict:
         backoff_min = min(interval * (2 ** min(fails, 5)), 24 * 60)
         repo.update_sensor_state(name, last_run_at=started, last_error=f"{type(e).__name__}: {e}"[:2000],
                                  consecutive_failures=fails,
-                                 next_run_at=(datetime.utcnow() + timedelta(minutes=backoff_min)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                                 next_run_at=(datetime.now(timezone.utc) + timedelta(minutes=backoff_min)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         repo.log_event("sensor", name, "failed", {"error": str(e)[:500], "consecutive_failures": fails}, actor=f"sensor:{name}")
         log.warning("sensor %s failed: %s", name, e)
         return {"sensor": name, "ok": False, "error": str(e), "new": 0}
@@ -106,6 +106,6 @@ def _run_sensor(name: str) -> dict:
             new += 1
     repo.update_sensor_state(name, last_run_at=started, last_ok_at=utcnow(), last_error=None, consecutive_failures=0,
                              cursor=ctx.cursor, last_count=new,
-                             next_run_at=(datetime.utcnow() + timedelta(minutes=interval)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                             next_run_at=(datetime.now(timezone.utc) + timedelta(minutes=interval)).strftime("%Y-%m-%dT%H:%M:%SZ"))
     repo.log_event("sensor", name, "collected", {"drafts": len(drafts), "new": new}, actor=f"sensor:{name}")
     return {"sensor": name, "ok": True, "drafts": len(drafts), "new": new}

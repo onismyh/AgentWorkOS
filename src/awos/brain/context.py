@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .. import repo
 from ..config import load_config
@@ -83,7 +83,7 @@ def _observations() -> str:
             continue
         if snap:
             chunks.append(f"### 来源：{name}\n{snap.strip()[:3000]}")
-    since = (datetime.utcnow() - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since = (datetime.now(timezone.utc) - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
     sigs = q("SELECT source, title, occurred_at FROM signals WHERE observed_at >= ? AND source IN "
              "('gmail','notion','mailmaster','zotero','inbox_drop') ORDER BY observed_at DESC LIMIT 60", (since,))
     if sigs:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import repo
@@ -90,7 +90,7 @@ def fail_or_retry(task: dict, owner: str, error: str | None, error_class: str | 
                     ref_id=task["id"], path=f"task/{task['id']}")
         return
     delay = _backoff(task["attempts"])
-    nxt = (datetime.utcnow() + timedelta(seconds=delay)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    nxt = (datetime.now(timezone.utc) + timedelta(seconds=delay)).strftime("%Y-%m-%dT%H:%M:%SZ")
     _move(task["id"], owner, TaskStatus.READY, f"第 {task['attempts']} 次尝试失败（{error_class}），{delay}s 后重试",
           next_attempt_at=nxt)
 
