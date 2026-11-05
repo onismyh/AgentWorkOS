@@ -165,3 +165,33 @@ def test_reminders_are_coalesced_by_topic_and_respect_window_and_quiet_hours(cli
     assert title == "有 3 件事等你（2 个话题）" and "thuthesis：2 项" in body and "求职：1 项" in body and level == "action"
     batcher.enqueue("风险高的动作", "x", level="high", ref_type="task", ref_id=t1)         # high priority goes out at once
     assert len(sent) == 2 and sent[1][2] == "high" and sent[1][0].startswith("有 1 件事等你")
+
+
+def test_decision_notes_are_learned_as_feedback(client):
+    from awos import repo
+    from awos.engine import actions
+    t = _task("整理论文仓库", project="paper", status="waiting_user")
+    a1 = _approval(task_id=t, kind="decision", title="先怎么处理 810 个文件？")
+    a2 = _approval(task_id=t, kind="decision", title="第二个问题")
+    actions.decide(a1, "approve", note="这个项目不管，后面不用追踪")
+    actions.decide(a2, "approve", note="ok")                                             # too short to be an instruction
+    facts = [f["value"] for f in repo.list_facts(kind="note") if f["key"].startswith("反馈·答复·")]
+    assert facts == ["用户在回答「先怎么处理 810 个文件？」时说：这个项目不管，后面不用追踪"]
+    from awos.brain.context import context_brief
+    assert "这个项目不管，后面不用追踪" in context_brief()                                  # triage / executors see it
+
+
+def test_dismiss_topic_clears_everything_open_and_requires_a_reason(client):
+    from awos import repo
+    t1 = _task("整理仓库", project="paper", status="waiting_approval")
+    kid = _task("子任务", parent_id=t1, status="running")
+    t2 = _task("另一件", project="paper", status="triaged")
+    other = _task("无关", project="other", status="triaged")
+    a = _approval(task_id=t1, kind="decision", title="怎么处理？")
+    assert client.post("/api/topics/p:paper/dismiss", json={"note": ""}, headers=H).status_code == 422
+    assert client.post("/api/topics/p:paper/dismiss", json={"note": "这个项目不管了"}).status_code == 401
+    r = client.post("/api/topics/p:paper/dismiss", json={"note": "这个项目不管了"}, headers=H).json()
+    assert r["dismissed"] == 2
+    assert repo.get_task(t1)["status"] == repo.get_task(t2)["status"] == "dismissed" and repo.get_task(kid)["status"] == "cancelled"
+    assert repo.get_approval(a)["status"] == "cancelled" and repo.get_task(other)["status"] == "triaged"
+    assert any("这个项目不管了" in f["value"] for f in repo.list_facts(kind="note"))

@@ -41,3 +41,16 @@ export function markRead(key, stamp) {
   return true;
 }
 export function markUnread(key) { const m = loadRead(); delete m[key]; lsSetJSON(READ_KEY, m); }
+
+/* ---- when this viewer last opened a topic (per viewer): decides whether a recap starts expanded ---- */
+const SEEN_KEY = 'awos.topicSeen';
+let seenMap = null;
+const loadSeen = () => { if (!seenMap) seenMap = lsGetJSON(SEEN_KEY, {}) || {}; return seenMap; };
+export const topicSeenAt = (key) => Number(loadSeen()[key]) || 0;
+export function touchTopic(key, now = Date.now()) {
+  const m = loadSeen();
+  m[key] = now;
+  const keys = Object.keys(m);
+  if (keys.length > 300) for (const k of keys.sort((a, b) => m[a] - m[b]).slice(0, keys.length - 250)) delete m[k];
+  lsSetJSON(SEEN_KEY, m);
+}

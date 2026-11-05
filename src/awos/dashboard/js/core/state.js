@@ -13,6 +13,6 @@ export const S = {
 export const VIEW_SCROLL = {};
 
 /** Lightweight caches so delegated handlers can find the object behind a data-id. */
-export const CACHE = { tasks: new Map(), approvals: new Map() };
+export const CACHE = { tasks: new Map(), approvals: new Map(), topicOf: new Map() };   // topicOf: task / approval id -> {key, title}
 export function cacheTask(t) { if (t?.id) CACHE.tasks.set(t.id, { ...(CACHE.tasks.get(t.id) || {}), ...t }); return t; }
 export function cacheApproval(a) { if (a?.id) CACHE.approvals.set(a.id, { ...(CACHE.approvals.get(a.id) || {}), ...a }); return a; }

@@ -129,8 +129,37 @@ def set_task_fields(task_id: str, actor: str = "user", **fields: Any) -> None:
         repo.update_task(task_id, actor=actor, **clean)
 
 
+def learn_from_decision(approval: dict, note: str | None, actor: str, via: str) -> None:
+    """What the user writes next to a decision ("这个项目不管，后面不用追踪") is an instruction about the future, not just a
+    comment on this one question: keep it as pinned feedback so triage and the executors see it."""
+    note = (note or "").strip()
+    if actor != "user" or via == "auto" or len(note) < 4:
+        return
+    title = approval["title"][:50]
+    repo.upsert_fact("note", f"反馈·答复·{title[:26]}", f"用户在回答「{title}」时说：{note}"[:400],
+                     source="user-feedback", confidence=1.0, actor="user", pinned=True)
+
+
+def dismiss_topic(key: str, reason: str, actor: str = "user") -> dict:
+    """"这个话题都不用管了": dismiss every open item of a topic (running work is stopped, pending questions are withdrawn)
+    and keep the reason as learned feedback."""
+    from ..brain import topics
+    done = {"done", "cancelled", "dismissed"}
+    n = 0
+    for t in topics.member_roots(key):
+        if t["status"] in done:
+            continue
+        for child in repo.children(t["id"]):
+            if child["status"] not in done:
+                cancel_task(child["id"], actor=actor, reason="parent topic dismissed")
+        dismiss_task(t["id"], actor=actor, reason=reason)
+        n += 1
+    return {"dismissed": n}
+
+
 def decide(approval_id: str, option: str, note: str | None = None, via: str = "dashboard", actor: str = "user") -> dict:
     approval = repo.decide_approval(approval_id, option, note=note, via=via, actor=actor)
+    learn_from_decision(approval, note, actor, via)
     from ..hitl.outbox import on_decision
     on_decision(approval)
     return repo.get_approval(approval_id)

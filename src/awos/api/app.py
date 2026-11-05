@@ -904,6 +904,14 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
     def topic_detail(key: str) -> dict:
         return _require(topics_mod.topic_view(key, _inbox_data()["feed"]), key)
 
+    @app.post("/api/topics/{key}/dismiss")
+    def topic_dismiss(key: str, body: TaskActionBody) -> dict:
+        _require(topics_mod.ensure_topic_row(key), key)
+        reason = (body.note or "").strip()
+        if len(reason) < 2:
+            raise HTTPException(422, "a reason is required (it is kept as feedback so the same thing is not suggested again)")
+        return {"ok": True, **actions.dismiss_topic(key, reason)}
+
     @app.post("/api/topics/{key}/refresh", status_code=202)
     def topic_refresh(key: str) -> dict:
         _require(repo.get_topic(key), key)
