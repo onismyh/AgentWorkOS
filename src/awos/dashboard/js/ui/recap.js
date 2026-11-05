@@ -7,9 +7,10 @@ import { absTime, cut, parseTs, when } from '../core/format.js';
 import { touchTopic, topicSeenAt } from '../core/store.js';
 import { go } from '../core/router.js';
 import { icon } from './icons.js';
-import { btn, empty, skel } from './components.js';
+import { btn, empty, skel, projectChip } from './components.js';
 import { toast } from './overlay.js';
 import { KIND_VIEW, OLD_MS, GEN, cachedTopic, dropTopicCache, loadTopic, normalizeEntries, topicSel } from '../domain/topics.js';
+import { FOCUS, noteTopicProjects, projectOfTopic } from '../domain/projects.js';
 
 const GIVE_UP_MS = 4 * 60 * 1000;     // a regeneration normally takes 1-3 minutes; stop showing the spinner after this
 
@@ -88,12 +89,18 @@ export function defaultOpen({ ts, topicKey }, now = Date.now()) {
   return !seen || now - seen > OLD_MS;
 }
 
+/** The project chip in the recap header: click -> the 所属项目 card of the topic (or, for an unlinked topic, the link dialog). */
+const rcProject = (p, topic) => (p?.key
+  ? projectChip(p, { act: 'open-topic', data: { key: topic.key, focus: 'project' }, cls: 'rc-pjchip' })
+  : projectChip(null, { empty: true, act: 'topic-project', data: { key: topic.key, title: topic.title }, cls: 'rc-pjchip' }));
+
 export function recapCard({ id, topic, ts, extraIds = [] }) {
   if (!topic?.key) return raw('');
   const open = defaultOpen({ ts, topicKey: topic.key });
   return h`<details class="recap-card" id="recap-${id}" data-lazy="recap" data-topic="${topic.key}" data-id="${id}" data-extra="${extraIds.join(',')}"${open ? raw(' open') : ''}>
     <summary data-act="recap-toggle"><span class="rc-ic">${icon('history', { size: 15 })}</span><span class="rc-title">前情提要</span>
       <button type="button" class="rc-topic" data-act="open-topic" data-key="${topic.key}" data-tip="查看这个话题的全部事项">${icon('layers', { size: 12 })}<span>${topic.title}</span></button>
+      <span class="rc-pj" data-rc-project>${projectOfTopic(topic.key) ? rcProject(projectOfTopic(topic.key), topic) : ''}</span>
       <span class="rc-line" data-rc-line></span>${icon('chevron-down', { size: 15, cls: 'rd-chev' })}</summary>
     <div class="rc-body" data-rc-body><div class="rc-skel" aria-busy="true" aria-label="正在加载前情提要">${skel('38%', 11)}${skel('94%', 13)}${skel('82%', 13)}${skel('90%', 11)}${skel('70%', 11)}</div></div></details>`;
 }
@@ -101,6 +108,7 @@ export function recapCard({ id, topic, ts, extraIds = [] }) {
 ACTS['recap-toggle'] = (el) => { const d = el.closest('details'); if (d) { d.open = !d.open; d.dataset.touched = '1'; } };
 ACTS['open-topic'] = (el, e) => {
   e?.stopPropagation?.();
+  if (el.dataset.focus === 'project') FOCUS.topic = el.dataset.key;   // the topic reader pulses its 所属项目 card once
   go('inbox', { sel: topicSel(el.dataset.key) });   // the new hash carries no task / run param, so an open drawer closes by itself
 };
 ACTS['recap-retry'] = (el) => { const card = el.closest('[data-lazy="recap"]'); if (card) fillRecap(card, { force: true }); };
@@ -148,6 +156,11 @@ function paintRecap(el, data) {
   const line = $('[data-rc-line]', el);
   const brief = data.brief;
   if (line) line.textContent = cut(brief?.state_now || (data.history || []).slice(-1)[0]?.text || '', 96);
+  const pj = $('[data-rc-project]', el);
+  if (pj && 'project' in data) {
+    noteTopicProjects([{ key: data.key, project: data.project }]);
+    setHTML(pj, rcProject(data.project, { key: data.key, title: data.title || el.dataset.topic }));
+  }
   el.dataset.painted = '1';
   if (!FIRST.has(el.id)) {
     FIRST.add(el.id);

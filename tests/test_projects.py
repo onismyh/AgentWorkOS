@@ -184,3 +184,16 @@ def test_background_pack_and_brief_prompt_use_the_users_context(client, monkeypa
     _fake_agent(monkeypatch, handler)
     topics.generate_brief("p:thuthesis")
     assert "用户的整体背景" in seen["p"] and "毕业与就业" in seen["p"] and "thuthesis 预答辩" in seen["p"]
+
+
+def test_linking_a_topic_to_a_project_makes_its_brief_stale(client, monkeypatch):
+    from awos import repo
+    from awos.brain import topics
+    _seed_context()
+    t = _task("检查仓库", project="thuthesis", status="waiting_user")
+    _approval(task_id=t, kind="decision", title="先怎么处理？")
+    _fake_agent(monkeypatch, lambda p, kw: {"state_now": "s", "recap": [], "asks": []})
+    topics.generate_brief("p:thuthesis")
+    assert topics.topic_view("p:thuthesis", [])["brief"]["stale"] is False
+    repo.link_topic_project("p:thuthesis", "学位论文 thuthesis", "rule")
+    assert topics.topic_view("p:thuthesis", [])["brief"]["stale"] is True                  # re-brief with the project background

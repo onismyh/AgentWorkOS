@@ -351,8 +351,13 @@ def open_items(key: str) -> list[dict]:
 
 
 def brief_basis(key: str) -> str:
+    """What a brief was written for: the open items and their states, and the project the topic belongs to (a brief
+    written before the topic was linked to its project lacks the user's background, so it counts as stale)."""
+    from . import projects as projects_mod
     items = open_items(key)
-    return repo.fingerprint("brief", key, *sorted(f"{i['id']}:{i['status']}:{i.get('updated_at') or i.get('created_at')}" for i in items))[:16]
+    proj = projects_mod.project_of_topic(key)
+    return repo.fingerprint("brief", key, proj["name"] if proj else "-",
+                            *sorted(f"{i['id']}:{i['status']}:{i.get('updated_at') or i.get('created_at')}" for i in items))[:16]
 
 
 def _age(ts: str | None) -> str:

@@ -11,6 +11,7 @@ import { btn, badge, empty, levelBadge, riskBadge } from './components.js';
 import { dialog, toast } from './overlay.js';
 import { optionButtons, taskActionList } from './reader.js';
 import { recapTimeline, briefNote, genBtnHTML } from './recap.js';
+import { projectCard, mountProjectCards } from './project-card.js';
 import { digestOf, recommendedKey } from '../domain/vocab.js';
 import { SECTIONS, SECTION_VIEW, ageWord, countSections, dropTopicCache, normalizeEntries, oldTone } from '../domain/topics.js';
 
@@ -74,6 +75,7 @@ export function topicReader(d, ctx = {}) {
         ${hist.length ? h`<span class="meta-i muted">${icon('history', { size: 13 })}<span>${hist.length} 条记录</span></span>` : ''}</div>
     </header>
     <div class="rd-body">
+      ${d.project === undefined ? '' : projectCard(d.project, { key: d.key, title: d.title })}
       <section class="tp-now" aria-labelledby="tp-now-h"><h2 id="tp-now-h">${icon('sparkles', { size: 14 })}现状</h2>
         ${brief?.state_now ? h`<p>${brief.state_now}</p>`
           : last ? h`<p>${last.text}<span class="muted"> · ${when(last.ts)}</span></p>` : h`<p class="muted">这个话题还没有任何记录。</p>`}</section>
@@ -89,8 +91,9 @@ export function topicReader(d, ctx = {}) {
     </div></article>`;
 }
 
-/** Fill the option buttons of approvals this pane has not seen full data for (a topic opened without the inbox buckets). */
+/** Fill the option buttons of approvals this pane has not seen full data for (a topic opened without the inbox buckets), and the 所属项目 card. */
 export function mountTopicReader(root) {
+  mountProjectCards(root);
   $$('[data-lazy="need-opts"]', root).forEach(async (slot) => {
     try {
       const d = await api(`/approvals/${enc(slot.dataset.id)}`);

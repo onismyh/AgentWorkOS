@@ -73,8 +73,7 @@ export function projectChip(p, { act, data, cls = '', empty = false, tip = true,
   const none = !p?.key;
   const name = none ? (label || '未关联项目') : p.name || p.key;
   const klass = `pj-chip ${none ? 'pj-none' : `pj-c${projectSlot(p.key)}`}${cls ? ` ${cls}` : ''}`;
-  const tipText = none ? '这个话题还没有关联项目' : `项目：${name}${p.summary ? `
-${p.summary}` : ''}`;
+  const tipText = none ? '这个话题还没有关联项目' : `项目：${name}${p.summary ? `\n${p.summary}` : ''}`;
   const inner = h`${icon(none ? 'circle-dashed' : 'folder', { size: 12 })}<span class="pj-n">${name}</span>`;
   const attrs = h`${act ? h` data-act="${act}"` : ''}${dataAttrs(data)}${tip ? tipAttr(tipText) : ''}`;
   return act ? h`<button type="button" class="${klass}"${attrs}>${inner}</button>` : h`<span class="${klass}"${attrs}>${inner}</span>`;
