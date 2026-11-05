@@ -34,6 +34,13 @@ def _slot(executor: str) -> threading.Semaphore:
         return _exec_slots[executor]
 
 
+_shutdown = threading.Event()
+
+
+def shutting_down() -> bool:
+    return _shutdown.is_set()
+
+
 def cancel_run(run_id: str) -> bool:
     with _cancels_lock:
         ev = _cancels.get(run_id)
@@ -45,6 +52,7 @@ def cancel_run(run_id: str) -> bool:
 
 def cancel_all_runs() -> int:
     """Signal every in-flight run to stop (daemon shutdown); each adapter then kills its process tree."""
+    _shutdown.set()  # runs killed by the shutdown must not trigger a fallback/hand-off run
     with _cancels_lock:
         events = list(_cancels.values())
     for ev in events:
@@ -176,16 +184,39 @@ def budget_ok(executor: str) -> tuple[bool, str]:
     return (spent < cap_usd, f"spent today ${spent:.2f}/${cap_usd:.2f}")
 
 
-def run_agent(prompt: str, *, purpose: str, route: str | None = None, executor: str | None = None,
+FALLBACK_CLASSES = {"budget", "capacity", "transient"}   # same reasons the task worker hands a task to the next executor
+
+
+def run_agent(prompt: str, *, purpose: str, route: str | None = None, executor: str | None = None, **kw: Any) -> tuple[str, RunResult]:
+    """Run an agent synchronously and track everything. Returns (run_id, result). Never raises for agent failure
+    (configuration errors such as an unknown/disabled executor raise before any run row is created).
+
+    With an explicit `executor` this is exactly one run. With only a `route` (background jobs: triage, digests, briefs,
+    context), a failure that another executor may not share (rate limit, overload, network, budget) moves on to the next
+    executor of that route - these jobs used to stay failed until the next cycle when e.g. Codex answered 429."""
+    if executor is not None:
+        return _run_once(prompt, purpose=purpose, route=route, executor=executor, **kw)
+    cands = executor_candidates(route or purpose)
+    if not cands:
+        raise RuntimeError(f"no available executor for route {(route or purpose)!r}")
+    run_id, res = _run_once(prompt, purpose=purpose, route=route, executor=cands[0], **kw)
+    for nxt in cands[1:]:
+        if (res.status != "failed" or (res.error_class or "transient") not in FALLBACK_CLASSES or _shutdown.is_set()):
+            break
+        log.warning("%s run %s failed on %s (%s: %s); falling back to %s", purpose, run_id, cands[0], res.error_class,
+                    (res.error or "")[:120], nxt)
+        run_id, res = _run_once(prompt, purpose=purpose, route=route, executor=nxt, **{**kw, "model": None})
+    return run_id, res
+
+
+def _run_once(prompt: str, *, purpose: str, route: str | None = None, executor: str,
               task_id: str | None = None, attempt: int = 1, cwd: Path | None = None, sandbox: str = "read-only",
               output_schema: dict | None = None, model: str | None = None, timeout_s: int | None = None,
               add_dirs: list[Path] | None = None, allow_network: bool = True, allow_connectors: bool = False,
               system_prompt: str | None = None, max_budget_usd: float | None = None,
               check_budget: bool = True) -> tuple[str, RunResult]:
-    """Run an agent synchronously and track everything. Returns (run_id, result). Never raises for agent failure
-    (configuration errors such as an unknown/disabled executor raise before any run row is created)."""
     cfg = load_config()
-    name = executor or pick_executor(route or purpose)
+    name = executor
     if not executor_enabled(name):
         raise RuntimeError(f"executor {name!r} is disabled")
     ex = get_executor(name)

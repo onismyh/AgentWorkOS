@@ -15,7 +15,7 @@ export const META = {
   transitions: {}, version: '',
 };
 
-export const PURPOSES = { triage: '分拣', plan: '规划', execute: '执行', verify: '验证', sensor: '传感器', context: '上下文', action: '动作', digest: '摘要' };
+export const PURPOSES = { triage: '分拣', plan: '规划', execute: '执行', verify: '验证', sensor: '传感器', context: '上下文', action: '动作', digest: '摘要', brief: '前情提要' };
 export const ENTITY = { task: '任务', run: '运行', approval: '审批', signal: '信号', sensor: '传感器', context: '上下文', artifact: '交付物', system: '系统' };
 export const EVENT_LABEL = {
   created: '创建', status_changed: '状态变更', updated: '更新', retried: '重试', decided: '决策', rejected: '已删除',

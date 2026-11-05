@@ -234,7 +234,7 @@ def process_task(task_id: str, owner: str) -> None:
 
 def _process(task: dict, owner: str) -> None:
     from ..hitl import outbox
-    from ..llm import executor_candidates, run_agent
+    from ..llm import executor_candidates, run_agent, shutting_down
 
     meta = task.get("meta") or {}
     dec = policy.decide(task)
@@ -303,7 +303,8 @@ def _process(task: dict, owner: str) -> None:
                                 max_budget_usd=max(0.1, min(remaining, run_cap)))
         if res.status == "succeeded" and res.structured:
             break
-        if idx + 1 < len(candidates) and (res.error_class or "transient") in HANDOFF_CLASSES and _still_mine(task["id"], owner):
+        if (idx + 1 < len(candidates) and (res.error_class or "transient") in HANDOFF_CLASSES and _still_mine(task["id"], owner)
+                and not shutting_down()):
             nxt = candidates[idx + 1]
             info = {"from": executor, "to": nxt, "reason": res.error_class, "error": (res.error or "")[:160], "run": run_id}
             handoffs.append({**info, "ts": db.utcnow()})

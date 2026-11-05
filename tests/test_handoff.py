@@ -126,3 +126,89 @@ def test_ids_created_in_the_same_second_sort_in_creation_order():
     ids = [new_id("run") for _ in range(300)]
     assert ids == sorted(ids) and len(set(ids)) == 300
     assert all(len(i) == len("run_") + 12 + 3 + 3 for i in ids)
+
+
+# --------------------------------------------------------------------------- background jobs fall back too
+
+
+def test_background_run_falls_back_to_the_next_executor_of_its_route(two):
+    from awos import db, llm
+    from awos.executors.base import RunResult
+    two["fake"].push("digest", RunResult(status="failed", error="exceeded retry limit, last status: 429 Too Many Requests", error_class="transient"))
+    two["fake2"].push("digest", exec_result(summary="由 fake2 完成"))
+    run_id, res = llm.run_agent("p", purpose="digest", route="other", check_budget=False)
+    assert res.status == "succeeded" and db.q1("SELECT executor FROM runs WHERE id = ?", (run_id,))["executor"] == "fake2"
+    assert [r["executor"] for r in db.q("SELECT executor FROM runs WHERE purpose = 'digest' ORDER BY id")] == ["fake", "fake2"]
+
+
+def test_background_fallback_skips_permanent_failures_and_explicit_executors(two):
+    from awos import llm
+    from awos.executors.base import RunResult
+    two["fake"].push("digest", RunResult(status="failed", error="bad schema", error_class="permanent"))
+    two["fake2"].push("digest", exec_result(summary="never used"))
+    _, res = llm.run_agent("p", purpose="digest", route="other", check_budget=False)
+    assert res.status == "failed" and len(two["fake2"].script["digest"]) == 1                  # permanent: no fallback
+    two["fake"].push("digest", RunResult(status="failed", error="429", error_class="transient"))
+    _, res = llm.run_agent("p", purpose="digest", executor="fake", check_budget=False)
+    assert res.status == "failed" and len(two["fake2"].script["digest"]) == 1                  # explicit executor: exactly one run
+
+
+def test_no_fallback_run_is_started_while_the_daemon_shuts_down(two):
+    from awos import llm
+    from awos.executors.base import RunResult
+    two["fake"].push("digest", RunResult(status="failed", error="exit 1", error_class="transient"))
+    two["fake2"].push("digest", exec_result(summary="never used"))
+    llm._shutdown.set()
+    try:
+        _, res = llm.run_agent("p", purpose="digest", route="other", check_budget=False)
+    finally:
+        llm._shutdown.clear()
+    assert res.status == "failed" and len(two["fake2"].script["digest"]) == 1
+
+
+# --------------------------------------------------------------------------- 异常 page diagnosis
+
+
+def _failed_run(purpose="digest", executor="claude", error="x", cls="transient", status="failed", task_id=None):
+    from awos import repo
+    rid = repo.create_run(purpose, executor, task_id=task_id)
+    repo.update_run(rid, status=status, ended_at="2026-11-05T10:00:00Z", error=error, error_class=cls)
+    return rid
+
+
+def test_failures_are_classified_in_plain_language(env):
+    from awos.api.diagnose import classify
+    c = lambda **r: classify({"status": "failed", **r})  # noqa: E731
+    assert c(error="budget exhausted: spent today $7.42 > $8.00", error_class="budget") == "budget"
+    assert c(error="waited for budget reservations to free up", error_class="capacity") == "queue"
+    assert c(error='{"message": "exceeded retry limit, last status: 429 Too Many Requests"}') == "upstream"
+    assert c(error="Selected model is at capacity. Please try a different model.") == "upstream"
+    assert c(error="Reconnecting... 5/5 (workspace routing discovery timed out)") == "network"
+    assert c(error="exit 1", error_class="transient") == "killed"
+    assert c(error="invalid schema", error_class="permanent") == "permanent"
+    assert classify({"status": "interrupted", "error": "daemon restarted"}) == "restart"
+
+
+def test_a_failure_is_resolved_once_a_later_run_of_the_same_kind_succeeded(env):
+    from awos import repo
+    from awos.api import diagnose
+    from awos.db import q1
+    old = _failed_run(error="429 Too Many Requests")
+    still = _failed_run(purpose="brief", error="at capacity")                                    # nothing succeeded after this one
+    ok = repo.create_run("digest", "claude")
+    repo.update_run(ok, status="succeeded", ended_at="2026-11-05T11:00:00Z")
+    rows = [q1("SELECT * FROM runs WHERE id = ?", (i,)) for i in (old, still)]
+    diagnose.annotate(rows)
+    assert rows[0]["diagnosis"]["resolved"] is True and rows[0]["diagnosis"]["kind"] == "upstream"
+    assert rows[1]["diagnosis"]["resolved"] is False and rows[1]["diagnosis"]["hint"]
+
+
+def test_open_failure_count_ignores_recovered_failures(env):
+    from awos import repo
+    from awos.api import diagnose
+    from awos.db import utcnow
+    _failed_run(error="429 Too Many Requests")                                                   # recovered below
+    ok = repo.create_run("digest", "claude")
+    repo.update_run(ok, status="succeeded", ended_at=utcnow())
+    _failed_run(purpose="brief", error="at capacity")                                           # still open
+    assert diagnose.open_failure_count("2000-01-01T00:00:00Z") == 1

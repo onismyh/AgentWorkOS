@@ -368,12 +368,12 @@ def test_mail_tasks_never_reach_deepseek_executors(env, monkeypatch, tmp_path):
     tid = add_manual_task("回复邮件", "d", level=3, category="comms", executor="dsh")
 
     import awos.llm as llm
-    real_pick = llm.pick_executor
+    real_cands = llm.executor_candidates
 
     def spy(route, preferred=None):
         seen.setdefault("calls", []).append((route, preferred))
-        return real_pick(route, preferred=preferred)
-    monkeypatch.setattr(llm, "pick_executor", spy)
+        return real_cands(route, preferred=preferred)
+    monkeypatch.setattr(llm, "executor_candidates", spy)
     fake.push("execute", lambda spec: exec_result(summary="ok") if "相关邮件原文" in spec.prompt else exec_result(summary="NO MAIL BLOCK"))
     drain(4)
     assert repo.get_task(tid)["summary"] == "ok"

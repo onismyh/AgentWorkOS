@@ -78,7 +78,7 @@ function updateBadges() {
   const k = S.dash?.kpis; if (!k) return;
   const set = (name, n, cls) => $$(`[data-badge="${name}"]`).forEach((b) => { b.hidden = !n; b.textContent = n > 99 ? '99+' : String(n || ''); b.className = `nav-b${n ? ` ${cls}` : ''}`; });
   set('inbox', (k.inbox || 0) + (k.approvals || 0), 'hot'); set('outbox', k.approvals || 0, 'hot');
-  set('runs', k.running || 0, ''); set('errors', k.failures_24h || 0, 'alert');
+  set('runs', k.running || 0, ''); set('errors', k.failures_open ?? k.failures_24h ?? 0, 'alert');
   const cm = $('#cost-meter');
   if (cm && k.budget_daily) {
     const f = k.cost_today / k.budget_daily; const tone = f >= 0.9 ? 'crit' : f >= 0.7 ? 'warn' : 'brand';

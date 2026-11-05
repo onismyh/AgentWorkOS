@@ -23,7 +23,7 @@ function fallbackDash(ov) {
   const c = ov.tasks || {};
   return {
     kpis: { inbox: ov.inbox?.tasks_total ?? 0, approvals: ov.approvals_pending ?? 0, running: ov.runs_running ?? 0, done_today: ov.done_today ?? 0,
-      failures_24h: ov.failures_24h?.total ?? 0, cost_today: ov.budget?.today_usd ?? 0, budget_daily: ov.budget?.daily_usd ?? 0 },
+      failures_24h: ov.failures_24h?.total ?? 0, failures_open: ov.failures_24h?.open ?? ov.failures_24h?.total ?? 0, cost_today: ov.budget?.today_usd ?? 0, budget_daily: ov.budget?.daily_usd ?? 0 },
     series: { days: (ov.cost?.days || []).map((d) => d.day.slice(5)), cost: (ov.cost?.days || []).map((d) => ({ day: d.day.slice(5), ...Object.fromEntries(Object.entries(d.by_executor || {}).map(([k, v]) => [k, v.usd])), total: d.usd })) },
     levels: {}, categories: [], funnel: null, executors: [], sensors: [], keywords: [], activity: [], _fallback: true, _tasks: c,
   };
@@ -174,12 +174,12 @@ export function render({ dash, inbox, ov, tc }) {
   const costTotals = (s.cost || []).map((r) => r.total);
   const need = k.inbox + k.approvals;
   const budgetFrac = k.budget_daily ? k.cost_today / k.budget_daily : 0;
-  return h`<div class="page-head"><div><h2>${need ? h`有 <b>${need}</b> 件事等你处理` : '没有等你处理的事项'}</h2><p class="muted">${k.running ? `${k.running} 个 Agent 正在运行` : '当前没有运行中的 Agent'} · 今日已完成 ${k.done_today} 项${k.failures_24h ? ` · 24 小时内 ${k.failures_24h} 次失败` : ''}</p></div></div>
+  return h`<div class="page-head"><div><h2>${need ? h`有 <b>${need}</b> 件事等你处理` : '没有等你处理的事项'}</h2><p class="muted">${k.running ? `${k.running} 个 Agent 正在运行` : '当前没有运行中的 Agent'} · 今日已完成 ${k.done_today} 项${k.failures_24h ? ` · 24 小时内 ${k.failures_24h} 次失败${k.failures_open === 0 ? '（均已恢复）' : `，${k.failures_open} 次未恢复`}` : ''}</p></div></div>
     <div class="kpis">
       ${kpiCard({ label: '待你处理', ic: 'inbox', value: need, href: '#/inbox', foot: h`任务 ${k.inbox} · 审批 ${k.approvals}`, spark: sparkline(s.tasks_created, { labels: days, name: '新增任务' }) })}
       ${kpiCard({ label: '执行中', ic: 'play', value: k.running, href: '#/runs?status=running,queued', foot: h`排队任务 ${(ov.tasks?.ready) ?? 0} · 近 14 天运行`, spark: sparkline(s.runs, { labels: days, name: '运行次数' }) })}
       ${kpiCard({ label: '今日完成', ic: 'circle-check', value: k.done_today, href: '#/tasks?status=done', foot: delta(s.tasks_done), spark: sparkline(s.tasks_done, { labels: days, name: '完成任务' }) })}
-      ${kpiCard({ label: '24h 失败', ic: 'circle-x', value: k.failures_24h, href: '#/errors', tone: k.failures_24h ? 'crit' : '', foot: k.failures_24h ? h`<span class="tone-crit-ink">${icon('circle-alert', { size: 12 })} 需要关注</span>` : h`<span class="tone-good-ink">${icon('check', { size: 12 })} 一切正常</span>`, spark: s.failures ? sparkline(s.failures, { labels: days, name: '失败次数' }) : '' })}
+      ${kpiCard({ label: '24h 失败', ic: 'circle-x', value: k.failures_24h, href: '#/errors', tone: k.failures_open ? 'crit' : '', foot: k.failures_open ? h`<span class="tone-crit-ink">${icon('circle-alert', { size: 12 })} ${k.failures_open} 项未恢复</span>` : k.failures_24h ? h`<span class="tone-good-ink">${icon('check', { size: 12 })} 均已自动恢复</span>` : h`<span class="tone-good-ink">${icon('check', { size: 12 })} 一切正常</span>`, spark: s.failures ? sparkline(s.failures, { labels: days, name: '失败次数' }) : '' })}
       ${kpiCard({ label: '今日花费', ic: 'dollar', value: usd(k.cost_today), href: '#/runs', foot: h`<span class="kpi-meter">${progress(budgetFrac, { tone: budgetFrac >= 0.9 ? 'crit' : budgetFrac >= 0.7 ? 'warn' : 'brand', label: `${Math.round(budgetFrac * 100)}% / ${usd(k.budget_daily)}` })}</span>`, spark: sparkline(costTotals, { labels: days, name: '花费', money: true }) })}
     </div>
     <div class="grid12">

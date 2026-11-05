@@ -428,3 +428,21 @@ def test_health_overview_meta_errors_sensors(client):
     assert client.post("/api/sensors/no_such_sensor/run", headers=H).status_code == 404
     assert client.get("/api/signals").json() == {"signals": []}
     assert client.get("/api/notifications").json() == {"notifications": []}
+
+
+def test_errors_and_overview_tell_recovered_failures_from_open_ones(client):
+    from awos import repo
+    from awos.db import utcnow
+    old = repo.create_run("digest", "claude")
+    repo.update_run(old, status="failed", error="429 Too Many Requests", error_class="transient", ended_at=utcnow())
+    ok = repo.create_run("digest", "claude")
+    repo.update_run(ok, status="succeeded", ended_at=utcnow())
+    live = repo.create_run("brief", "codex")
+    repo.update_run(live, status="failed", error="Selected model is at capacity", error_class="transient", ended_at=utcnow())
+    errs = client.get("/api/errors").json()
+    by_id = {r["id"]: r["diagnosis"] for r in errs["runs"]}
+    assert by_id[old]["resolved"] is True and by_id[old]["label"] and by_id[live]["resolved"] is False and by_id[live]["hint"]
+    assert errs["open"] == 1
+    f = client.get("/api/overview").json()["failures_24h"]
+    assert f["total"] == 2 and f["open"] == 1
+    assert client.get("/api/dashboard").json()["kpis"]["failures_open"] == 1

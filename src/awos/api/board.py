@@ -23,6 +23,12 @@ COLUMNS: list[dict] = [
 ]
 
 
+def _open_failures(since_utc: str) -> int:
+    """Failures in the window that have not recovered (a later run of the same kind succeeded, the task closed, ...)."""
+    from . import diagnose
+    return diagnose.open_failure_count(since_utc) + (q("SELECT COUNT(*) n FROM tasks WHERE status = 'failed' AND updated_at >= ?", (since_utc,)) or [{"n": 0}])[0]["n"]
+
+
 def _utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -144,8 +150,8 @@ def dashboard(days: int = 14) -> dict:
     kpis = {"inbox": sum(counts.get(s, 0) for s in ("review", "waiting_user", "triaged", "failed")), "approvals": pending,
             "running": counts.get("running", 0) + (q("SELECT COUNT(*) n FROM tasks WHERE status = 'blocked' AND id IN (SELECT parent_id FROM tasks WHERE status = 'running')")[0]["n"]),
             "done_today": (q("SELECT COUNT(*) n FROM tasks WHERE status = 'done' AND finished_at >= ?", (midnight,)) or [{"n": 0}])[0]["n"],
-            "failures_24h": failures, "cost_today": round(float(today_cost["usd"]), 4),
-            "budget_daily": float(load_config().get("budget.daily_usd", 8.0))}
+            "failures_24h": failures, "failures_open": _open_failures(since24), "cost_today": round(float(today_cost["usd"]), 4),
+            "budget_daily": float(load_config().get("budget.daily_usd", 15.0))}
 
     funnel = {
         "signals": (q("SELECT COUNT(*) n FROM signals WHERE observed_at >= ?", (start,)) or [{"n": 0}])[0]["n"],

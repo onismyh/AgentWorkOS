@@ -33,6 +33,7 @@ from .. import __version__, repo
 from ..brain import projects as projects_mod, summarize, topics as topics_mod
 from ..bus import bus
 from . import board as board_mod
+from . import diagnose
 from ..config import load_config
 from ..db import loads, parse_ts, q, q1, utcnow
 from ..engine import actions
@@ -520,13 +521,18 @@ def _errors(limit: int = 100) -> dict:
                                      "ORDER BY COALESCE(ended_at, started_at, '') DESC, id DESC LIMIT ?", (limit,))]
     tasks = [_brief_task(t) for t in repo.list_tasks(status="failed", limit=limit)]
     _attach_last_error(tasks)  # type: ignore[arg-type]
-    return {
-        "runs": _attach_task(runs),
+    runs = _attach_task(runs)
+    diagnose.annotate(runs)
+    out = {
+        "runs": runs,
         "tasks": tasks,
         "sensors": [s for s in _sensors() if s["last_error"]],
         "approvals": _attach_task(repo.list_approvals(status=ApprovalStatus.FAILED, limit=limit)),
         "notifications": q("SELECT * FROM notifications WHERE status = 'failed' ORDER BY created_at DESC LIMIT ?", (limit,)),
     }
+    out["open"] = (sum(1 for r in runs if not r["diagnosis"]["resolved"]) + len(tasks) + len(out["sensors"])
+                   + len(out["approvals"]) + len(out["notifications"]))
+    return out
 
 
 # --------------------------------------------------------------------------- files
@@ -702,7 +708,8 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
             "tasks": _status_counts(), "inbox": _inbox_counts(),
             "approvals_pending": len(repo.list_approvals(status=ApprovalStatus.PENDING, limit=1000)),
             "runs_running": sum(1 for r in running if r["status"] == RunStatus.RUNNING), "running": _attach_task(running),
-            "failures_24h": {"runs": failed_runs["n"], "tasks": failed_tasks["n"], "total": failed_runs["n"] + failed_tasks["n"]},
+            "failures_24h": {"runs": failed_runs["n"], "tasks": failed_tasks["n"], "total": failed_runs["n"] + failed_tasks["n"],
+                             "open": diagnose.open_failure_count(since) + failed_tasks["n"]},
             "done_today": done_today["n"], "budget": _budget(), "cost": _cost_days(14),
             "deliverables": _attach_task(_decorate_artifacts(repo.list_artifacts(limit=8))),
             "recent_errors": recent_errors,
