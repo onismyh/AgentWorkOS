@@ -141,12 +141,13 @@ export const REL_KINDS = [
   { key: 'goal', label: '目标', icon: 'flag' },
   { key: 'note', label: '笔记', icon: 'file-text' },
 ];
-/** Up to `max` related facts to preview: deadlines first, then people, goals, notes; the AI's working notes last. */
+/** Up to `max` related facts to preview: deadlines first, then people, notes, goals; the AI's working notes last. */
 export function pickRelated(related, max = 3) {
   const out = [];
   const add = (kind, list) => { for (const f of list || []) out.push({ kind, key: f.key, value: f.value, progress: kind === 'note' && isProgressNote(f.key) }); };
-  add('deadline', related?.deadline); add('person', related?.person); add('goal', related?.goal);
+  add('deadline', related?.deadline); add('person', related?.person);
   add('note', (related?.note || []).filter((f) => !isProgressNote(f.key)));
+  add('goal', related?.goal);
   add('note', (related?.note || []).filter((f) => isProgressNote(f.key)));
   return out.slice(0, max);
 }

@@ -362,8 +362,11 @@ import {{ pathToFileURL }} from 'node:url';
 const root = {root};
 await import(pathToFileURL(root + '/shell.js').href);
 const {{ ACTS }} = await import(pathToFileURL(root + '/core/acts.js').href);
-const need = ['topic-toggle', 'topic-collapse-all', 'split-group', 'open-item', 'recap-toggle', 'open-topic', 'recap-retry', 'topic-refresh', 'topic-dismiss', 'go-topics'];
+const need = ['topic-toggle', 'topic-collapse-all', 'split-group', 'open-item', 'recap-toggle', 'open-topic', 'recap-retry', 'topic-refresh', 'topic-dismiss', 'go-topics', 'topic-project', 'open-project-inbox', 'open-context', 'split-project-clear', 'pj-rel-toggle'];
+const {{ CHANGES, INPUTS }} = await import(pathToFileURL(root + '/core/acts.js').href);
 const missing = need.filter((k) => typeof ACTS[k] !== 'function');
+if (typeof CHANGES['pj-choice'] !== 'function') missing.push('change:pj-choice');
+if (typeof INPUTS['pj-filter'] !== 'function') missing.push('input:pj-filter');
 if (missing.length) {{ console.log('MISSING ' + missing.join(', ')); process.exit(1); }}
 console.log('ok');
 """
@@ -384,7 +387,7 @@ const root = {root};
 await import(pathToFileURL(root + '/shell.js').href);
 const {{ ACTS, CHANGES, INPUTS, FORMS }} = await import(pathToFileURL(root + '/core/acts.js').href);
 const files = []; const walk = (d) => {{ for (const e of readdirSync(d, {{ withFileTypes: true }})) {{ const p = d + '/' + e.name; if (e.isDirectory()) walk(p); else if (p.endsWith('.js') && !p.endsWith('core/acts.js')) files.push(p); }} }}; walk(root);
-const kinds = [['act', ACTS, [/data-act="([a-z0-9-]+)"/g, /\bact:\s*'([a-z0-9-]+)'/g]], ['change', CHANGES, [/data-change="([a-z0-9-]+)"/g]], ['input', INPUTS, [/data-input="([a-z0-9-]+)"/g]], ['form', FORMS, [/data-form="([a-z0-9-]+)"/g]]];
+const kinds = [['act', ACTS, [/data-act="([a-z0-9-]+)"/g, /\\bact:\\s*'([a-z0-9-]+)'/g]], ['change', CHANGES, [/data-change="([a-z0-9-]+)"/g]], ['input', INPUTS, [/data-input="([a-z0-9-]+)"/g]], ['form', FORMS, [/data-form="([a-z0-9-]+)"/g]]];
 const missing = [];
 for (const f of files) {{ const t = readFileSync(f, 'utf8'); for (const [kind, reg, res] of kinds) for (const re of res) for (const m of t.matchAll(re)) if (!reg[m[1]]) missing.push(kind + ':' + m[1] + ' (' + f.split('/js/')[1] + ')'); }}
 if (missing.length) {{ console.log('MISSING ' + [...new Set(missing)].join(', ')); process.exit(1); }}
@@ -458,8 +461,8 @@ def test_served_module_graph_is_complete(client):
             target = next(x for x in rel_import if x)
             queue.append(posixpath.normpath(posixpath.join(base, target)))
     assert len(seen) >= 20, sorted(seen)
-    assert {"js/domain/topics.js", "js/ui/recap.js", "js/ui/topic-reader.js"} <= seen, sorted(seen)
-    assert "css/topics.css" in css.text, "the topics stylesheet is imported"
+    assert {"js/domain/topics.js", "js/ui/recap.js", "js/ui/topic-reader.js", "js/domain/projects.js", "js/ui/project-card.js", "js/ui/project-reader.js"} <= seen, sorted(seen)
+    assert "css/topics.css" in css.text and "css/projects.css" in css.text, "the topics / projects stylesheets are imported"
 
 
 def test_new_api_contract_is_what_the_ui_expects(client):
@@ -505,3 +508,205 @@ def test_topics_api_contract_the_ui_reads(client):
     ok = client.post(f"/api/topics/{enc}/dismiss", json={"note": "这个仓库不用再追踪了"}, headers=H).json()
     assert ok["ok"] is True and ok["dismissed"] >= 1
     assert not [t for t in client.get("/api/inbox").json()["topics"] if t["key"] == key], "a dismissed topic leaves the inbox"
+
+@needs_node
+def test_projects_grouping_cards_and_list_logic():
+    """Projects: colour slot, grouping (按项目 default, 未关联项目 last), chips / 所属项目 card / project reader (escaping), the list keys over
+    project headers, ?project= filter, older-server fallback, and the 上下文 project cards with the AI's working notes muted."""
+    root = json.dumps(DASH.joinpath("js").as_posix())
+    code = r"""
+import { pathToFileURL } from 'node:url';
+const store = new Map();
+globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) };
+const u = (p) => pathToFileURL(__ROOT__ + '/' + p).href;
+const bad = []; const must = (n, c) => { if (!c) bad.push(n); };
+const P = await import(u('domain/projects.js'));
+const T = await import(u('domain/topics.js'));
+const C = await import(u('ui/components.js'));
+const PC = await import(u('ui/project-card.js'));
+const PR = await import(u('ui/project-reader.js'));
+const TR = await import(u('ui/topic-reader.js'));
+const R = await import(u('ui/recap.js'));
+const K = await import(u('views/knowledge.js'));
+const split = await import(u('views/split.js'));
+const St = await import(u('core/state.js'));
+const evil = '<img src=x onerror=alert(1)><script>alert(2)</script>';
+const clean = (s) => !s.includes('<img') && !s.includes('<script');
+
+// ---- colour slot: from the key, stable, 1..8
+const names = ['学位论文 thuthesis', 'MoE 路由论文', '实验室组会', '海外博后申请', 'AgentWorkOS', '开题报告归档'];
+const slots = names.map(P.projectSlot);
+must('slot range', slots.every((s) => Number.isInteger(s) && s >= 1 && s <= 8));
+must('slot is stable and spread', P.projectSlot('x') === P.projectSlot('x') && new Set(slots).size >= 3);
+must('link source labels', P.linkSource({ link_source: 'user' }).label === '你指定' && P.linkSource({ link_source: 'llm' }).label === 'AI 推断' && P.linkSource(null).label === 'AI 推断');
+must('progress notes', P.isProgressNote('进展·abc') && !P.isProgressNote('导师') && P.progressTitle('进展·abc') === 'abc');
+const rel = { deadline: [{ key: 'd1', value: 'v' }], person: [{ key: 'p1', value: 'v' }], goal: [{ key: 'g1', value: 'v' }], note: [{ key: '进展·x', value: 'v' }, { key: 'n1', value: 'v' }] };
+const pick = P.pickRelated(rel, 99);
+must('related order: deadline, person, notes, goal, working notes last', pick.map((f) => f.key).join() === 'd1,p1,n1,g1,进展·x');
+must('related max + working-note flag', P.pickRelated(rel, 3).length === 3 && pick[4].progress === true && pick[3].progress === false && P.relatedTotal(rel) === 5);
+must('server counts -> section keys', P.sectionCounts({ decisions: 2, approvals: 1, review: 3, total: 6 }).decision === 2 && P.sectionCounts({ approvals: 1 }).approval === 1);
+
+// ---- working notes -> their project (leading （…） of the value)
+const projs = [{ key: '学位论文 thuthesis' }, { key: 'MoE 路由论文' }, { key: 'AgentWorkOS' }];
+must('note -> project by （name）', K.noteProject({ value: '（学位论文 thuthesis）仓库有 7 个未提交文件' }, projs)?.key === '学位论文 thuthesis');
+must('partial names match', K.noteProject({ value: '（thuthesis）x' }, projs)?.key === '学位论文 thuthesis');
+must('no leading （） or unknown project -> none', K.noteProject({ value: 'GPU 服务器占用 91%' }, projs) === null && K.noteProject({ value: '（海外博后）x' }, projs) === null);
+
+// ---- grouping: topics -> projects (first seen order, unlinked last, aggregated)
+const mk = (key, topic, section, ts) => ({ key, dom: key, kind: 'task', id: key, section, headline: key, gist: '', keywords: [], title: key, topic_key: topic, topic_title: topic, ts, stamp: ts, level: 1 });
+const topics = [
+  { key: 'tA', title: 'A', project: { key: 'P1', name: 'P1', summary: 's', link_source: 'user' }, state_now: 'now A', oldest_ts: '2026-11-02T00:00:00Z' },
+  { key: 'tC', title: 'C', project: { key: 'P2', name: 'P2' }, state_now: 'now C' },
+  { key: 'tB', title: 'B', project: { key: 'P1', name: 'P1' } },
+  { key: 'tD', title: 'D', project: null },
+];
+const items = [mk('task:a1', 'tA', 'decision', '2026-11-03T00:00:00Z'), mk('task:b1', 'tB', 'review', '2026-11-01T00:00:00Z'), mk('task:c1', 'tC', 'suggested', '2026-11-04T00:00:00Z'), mk('task:d1', 'tD', 'failed', '2026-11-05T00:00:00Z')];
+const tg = T.groupByTopic(items, topics);
+must('topic groups carry their project', tg.find((g) => g.key === 'tA').project.key === 'P1' && tg.find((g) => g.key === 'tD').project === null);
+const pg = P.groupByProject(tg);
+must('project order: first seen, 未关联项目 last', pg.map((g) => g.key).join() === 'P1,P2,__none__');
+must('a project holds all its topics', pg[0].topics.map((t) => t.key).join() === 'tA,tB' && pg[0].items.length === 2);
+must('aggregated counts / oldest / state', pg[0].counts.decision === 1 && pg[0].counts.review === 1 && pg[0].counts.total === 2 && pg[0].oldest_ts === '2026-11-01T00:00:00Z' && pg[0].state_now === 'now A');
+must('unlinked group', pg[2].name === '未关联项目' && pg[2].project === null && pg[2].items.length === 1);
+
+// ---- the chip
+const chip = String(C.projectChip({ key: 'k', name: evil, summary: evil }));
+must('chip escapes + has a colour slot', clean(chip) && chip.includes('pj-chip') && /pj-c[1-8]/.test(chip) && chip.includes('&lt;img'));
+const btnChip = String(C.projectChip({ key: 'k', name: 'n' }, { act: 'open-topic', data: { key: 't', focus: 'project' } }));
+must('chip is a button when it has an action', btnChip.startsWith('<button') && btnChip.includes('data-act="open-topic"') && btnChip.includes('data-focus="project"'));
+must('chip without a project', String(C.projectChip(null)) === '' && String(C.projectChip(null, { empty: true })).includes('pj-none'));
+
+// ---- 所属项目 card + readers
+const card = String(PC.projectCard({ key: 'P1', name: evil, summary: evil, link_source: 'user' }, { key: 'tA', title: evil }));
+must('card escapes', clean(card));
+must('card parts', card.includes('data-pj-card') && card.includes('所属项目') && card.includes('你指定') && card.includes('data-act="topic-project"') && card.includes('data-pj-fill') && card.includes('更改关联'));
+must('AI badge', String(PC.projectCard({ key: 'P1', name: 'n', summary: '', link_source: 'llm' }, { key: 't', title: 'T' })).includes('AI 推断'));
+const none = String(PC.projectCard(null, { key: 't', title: 'T' }));
+must('empty card', none.includes('这个话题还没有关联项目') && none.includes('data-act="topic-project"') && none.includes('关联项目…') && !none.includes('data-pj-fill'));
+const rd = String(TR.topicReader({ key: 'k', title: 'T', project: { key: 'P', name: evil, summary: evil, link_source: 'llm' }, brief: null, history: [], items: [], counts: {} }));
+must('topic reader: project card above 现状, escaped', clean(rd) && rd.indexOf('data-pj-card') > 0 && rd.indexOf('data-pj-card') < rd.indexOf('tp-now'));
+must('older server (no project field): no card', !String(TR.topicReader({ key: 'k', title: 'T', brief: null, history: [], items: [], counts: {} })).includes('data-pj-card'));
+must('project null: the empty card', String(TR.topicReader({ key: 'k', title: 'T', project: null, brief: null, history: [], items: [], counts: {} })).includes('pj-card-none'));
+const grp = { key: 'P1', project: { key: 'P1', name: evil, summary: evil }, name: evil, topics: [{ key: 'tA', title: evil, counts: { decision: 1, total: 1 }, state_now: evil, oldest_ts: '2026-11-01T00:00:00Z' }], counts: { decision: 1, total: 1 }, oldest_ts: '2026-11-01T00:00:00Z' };
+const prd = String(PR.projectReader({ key: 'P1', name: evil, summary: evil, related: { deadline: [{ key: evil, value: evil }], person: [], note: [{ key: '进展·x', value: '（P1）' + evil }], goal: [] },
+  recent_tasks: [{ id: 'tsk_1', title: evil, headline: evil, status: 'done', updated_at: '2026-11-01T00:00:00Z' }] }, grp, { view: 'inbox' }));
+must('project reader escapes', clean(prd) && prd.includes('data-reader="project"'));
+must('project reader actions', prd.includes('data-act="open-project-inbox"') && prd.includes('data-act="open-context"') && prd.includes('data-act="split-select"') && prd.includes('data-act="open-task"'));
+must('project reader works without the API detail', String(PR.projectReader({ _fallback: true, key: 'P1', name: 'n', summary: '' }, { ...grp, name: 'n', project: { key: 'P1', name: 'n' } }, {})).includes('这个项目还没有简介'));
+P.noteTopicProjects([{ key: 'tA', project: { key: 'P1', name: 'P1' } }, { key: 'tZ', project: null }]);
+const rc = String(R.recapCard({ id: 'tsk_1', topic: { key: 'tA', title: 'A' }, ts: '2026-11-01T00:00:00Z' }));
+must('recap header shows the project chip (click -> the topic reader)', rc.includes('data-rc-project') && rc.includes('pj-chip') && rc.includes('data-focus="project"'));
+must('recap header: unlinked topic has no chip yet', !String(R.recapCard({ id: 'x', topic: { key: 'tZ', title: 'Z' }, ts: '2026-11-01T00:00:00Z' })).includes('pj-chip'));
+
+// ---- the inbox list grouped by project
+const ctl = new split.Split({ id: 'unit-pj', title: '收件箱', icon: 'inbox', sections: [], emptyAll: () => '' });
+ctl.adopt({ items, extra: null, topics });
+must('default grouping is 按项目', ctl.mode() === 'project' && ctl.hasProjects());
+must('keys: project header only for projects with several topics; 未关联项目 has none', ctl.visibleKeys().join() === 'project:P1,topic:tA,task:a1,topic:tB,task:b1,topic:tC,task:c1,topic:tD,task:d1', ctl.visibleKeys().join());
+ctl.collapsed = { 'pj:P1': true };
+must('collapsed project keeps its header only', ctl.visibleKeys().join() === 'project:P1,topic:tC,task:c1,topic:tD,task:d1');
+ctl.sel = 'task:a1';
+must('j / k anchor of an item inside a collapsed project is the project header', ctl.anchor() === 'project:P1' && ctl.headerOf('task:a1') === 'project:P1');
+ctl.collapsed = {}; ctl.sel = null;
+must('header of an item is its topic', ctl.headerOf('task:a1') === 'topic:tA' && ctl.headerOf('topic:tA') === 'project:P1');
+ctl.collapsed = { tC: true };
+must('a collapsed single-topic project keeps its header (= the topic)', ctl.visibleKeys().includes('topic:tC') && !ctl.visibleKeys().includes('task:c1'));
+ctl.collapsed = {};
+must('project / topic selections exist', ctl.exists('project:P1') && ctl.exists('topic:tC') && !ctl.exists('project:__none__') && !ctl.exists('project:nope'));
+must('project group aggregates the whole inbox', ctl.findProject('project:P1').topics.length === 2 && ctl.projectOf('tD') === null && ctl.projectOf('tA').key === 'P1');
+ctl.paintList = () => {}; ctl.paintToolbar = () => {};
+ctl.collapsed = { 'pj:P1': true, tA: true };
+must('reveal opens the groups around a selection', ctl.reveal('task:a1') === true && !ctl.collapsed['pj:P1'] && !ctl.collapsed.tA);
+must('successor of a vanished project header is the next header', (() => { const prev = ctl.visibleKeys(); ctl.adopt({ items: items.filter((i) => i.topic_key !== 'tA' && i.topic_key !== 'tB'), extra: null, topics }); const nxt = ctl.successor(prev, 'project:P1'); ctl.adopt({ items, extra: null, topics }); return nxt === 'topic:tC'; })());
+const html = String(ctl.listBodyHTML());
+must('list markup: project groups, sub-topics, 未关联项目', html.includes('data-project="P1"') && html.includes('2 个话题') && html.includes('data-project="__none__"') && html.includes('未关联项目') && html.includes('by-project'));
+const noProj = new split.Split({ id: 'unit-pj2', title: '收件箱', icon: 'inbox', sections: [], emptyAll: () => '' });
+noProj.adopt({ items, extra: null, topics: topics.map(({ project, ...t }) => t) });
+must('older server (no project field): falls back to 按话题', noProj.mode() === 'topic' && !noProj.hasProjects());
+St.S.params = new URLSearchParams('project=P2');
+must('?project= filters the list', ctl.visible().map((i) => i.key).join() === 'task:c1');
+St.S.params = new URLSearchParams('project=__none__');
+must('?project=__none__ shows the unlinked topics', ctl.visible().map((i) => i.key).join() === 'task:d1');
+const bar = String(ctl.toolbarHTML());
+must('toolbar: 按项目 / 按话题 / 按类型 + the filter chip', bar.includes('按项目') && bar.includes('按话题') && bar.includes('按类型') && bar.includes('data-act="split-project-clear"'));
+St.S.params = new URLSearchParams('');
+const store2 = await import(u('core/store.js'));
+store2.pref.set('unit-pj.group', 'topic');
+must('按话题 headers carry the project chip', String(ctl.listBodyHTML()).includes('tg-pj') && ctl.mode() === 'topic');
+store2.pref.set('unit-pj.group', 'type');
+const rows = String(ctl.listBodyHTML());
+must('按类型 rows carry the project chip', ctl.mode() === 'type' && rows.includes('in-row'));
+const rowEvil = String(split.rowHTML(mk('task:e', 'tA', 'review', '2026-11-01T00:00:00Z'), null, { showTopic: true, project: { key: 'P', name: evil } }));
+must('row chip escapes', clean(rowEvil) && rowEvil.includes('pj-chip'));
+
+// ---- 上下文: projects as cards, working notes muted under a project or in a group of their own
+const fact = (id, kind, key, value, extra = {}) => ({ id, kind, key, value, source: 'ctx', confidence: 0.6, status: 'active', pinned: 1, updated_at: '2026-11-01T00:00:00Z', ...extra });
+const ctx = K.contextView.render({ kinds: { project: '项目', note: '备注' }, groups: {
+  project: [fact('c1', 'project', '学位论文 thuthesis', '修订第四章'), fact('c2', 'project', evil, evil)],
+  note: [fact('n1', 'note', '编译命令', 'make thesis'), fact('n2', 'note', '进展·a', '（学位论文 thuthesis）7 个未提交文件', { source: 'agent' }), fact('n3', 'note', '进展·b', 'GPU 磁盘 91%', { source: 'agent' })] },
+  profile: { exists: false, path: 'p' }, count: 5,
+  projects: [{ key: '学位论文 thuthesis', name: '学位论文 thuthesis', summary: 's', open_items: 4, topic_keys: ['t1', 't2'], deadlines: 1, notes: 2, last_activity: '2026-11-04T00:00:00Z' }] });
+const ctxHtml = String(ctx);
+must('context: one card per project with the link to the filtered inbox', ctxHtml.includes('data-project-card="学位论文 thuthesis"') && ctxHtml.includes('href="#/inbox?project=') && ctxHtml.includes('关联话题') && ctxHtml.includes('待处理'));
+must('context: edit / pin / delete stay on the project cards', ctxHtml.includes('data-act="fact-edit"') && ctxHtml.includes('data-act="fact-delete"'));
+must('context: 相关事实 is collapsed and loads lazily', ctxHtml.includes('data-act="pj-rel-toggle"') && !ctxHtml.includes('pjc-rel" id="pjrel-c1" data-key="学位论文 thuthesis" open'));
+must('context: matched working notes sit under their project, the rest in 工作笔记', ctxHtml.includes('pjc-notes') && ctxHtml.includes('ctx-progress') && ctxHtml.includes('7 个未提交文件') && ctxHtml.includes('GPU 磁盘 91%'));
+const noteCard = ctxHtml.slice(ctxHtml.indexOf('<h3>备注</h3>'), ctxHtml.indexOf('</section>', ctxHtml.indexOf('<h3>备注</h3>')));
+must('context: working notes are not in 备注', noteCard.includes('make thesis') && !noteCard.includes('进展·') && !noteCard.includes('GPU 磁盘'));
+must('context escapes', clean(ctxHtml));
+if (bad.length) { console.log('FAILED: ' + bad.join(', ')); process.exit(1); }
+console.log('ok');
+"""
+    r = run_node(code.replace("__ROOT__", root))
+    assert r.returncode == 0, (r.stdout + r.stderr)[:2500]
+
+
+def test_project_tokens_are_defined_for_both_themes():
+    """The 8 identity colours exist in the light theme and in both dark scopes (OS preference + the manual toggle); projects.css is imported."""
+    tokens = (DASH / "css" / "tokens.css").read_text(encoding="utf-8")
+    for i in range(1, 9):
+        assert tokens.count(f"--pj{i}:") == 3, f"--pj{i} must be set for light, dark (media) and dark (data-theme)"
+    assert 'css/projects.css' in (DASH / "style.css").read_text(encoding="utf-8")
+    css = (DASH / "css" / "projects.css").read_text(encoding="utf-8")
+    for i in range(1, 9):
+        assert f".pj-c{i} {{ --pjc: var(--pj{i}); }}" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css and "@media (max-width: 480px)" in css, "motion + phone rules"
+
+
+def test_projects_api_contract_the_ui_reads(client):
+    """Projects: topics carry `project`, /api/projects + /api/projects/{key} have the fields the cards read, and linking needs the token."""
+    from urllib.parse import quote
+
+    from awos import repo
+    name = "学位论文 thuthesis"
+    repo.upsert_fact("project", name, "thuthesis 在 revision 分支上修订第四章", source="ctx", actor="user", pinned=True)
+    repo.upsert_fact("deadline", "预答辩（学位论文 thuthesis）", "2026-12-05 14:00", source="ctx", actor="user", pinned=True)
+    repo.upsert_fact("note", "进展·thuthesis-commit-state", "（学位论文 thuthesis）7 个未提交文件", source="agent", actor="agent")
+    tid = repo.create_task("检查 thuthesis 仓库未提交改动", status="triaged", project="thuthesis")
+    inbox = client.get("/api/inbox").json()
+    assert inbox["topics"] and all("project" in t for t in inbox["topics"]), "every topic summary carries `project` (null when unlinked)"
+    key = next(f["topic_key"] for f in inbox["feed"] if f["id"] == tid)
+    enc = quote(key, safe="")
+    H = {"X-AWOS-Token": "t0ken"}
+    assert client.post(f"/api/topics/{enc}/project", json={"project_key": name}).status_code == 401, "linking needs the token"
+    assert client.post("/api/topics/nope-not-a-topic/project", json={"project_key": name}, headers=H).status_code == 404
+    assert client.post(f"/api/topics/{enc}/project", json={"project_key": "没有这个项目"}, headers=H).status_code == 422
+    ok = client.post(f"/api/topics/{enc}/project", json={"project_key": name}, headers=H).json()
+    assert ok["ok"] is True and {"key", "name", "summary", "link_source"} <= set(ok["project"]) and ok["project"]["link_source"] == "user"
+    topic = client.get(f"/api/topics/{enc}").json()
+    assert topic["project"]["key"] == name, "the topic reader gets the project with the topic"
+    assert next(t for t in client.get("/api/inbox").json()["topics"] if t["key"] == key)["project"]["name"] == name
+    lst = client.get("/api/projects").json()["projects"]
+    p = next(x for x in lst if x["key"] == name)
+    assert {"key", "name", "summary", "open_items", "topic_keys", "deadlines", "notes", "last_activity"} <= set(p)
+    assert key in p["topic_keys"] and p["open_items"] >= 1 and p["deadlines"] >= 1
+    d = client.get(f"/api/projects/{quote(name, safe='')}").json()
+    assert {"key", "name", "summary", "pinned", "fact_id", "related", "topics", "recent_tasks", "role"} <= set(d), "keys with spaces / CJK are URL-encoded"
+    assert {"deadline", "person", "note", "goal"} <= set(d["related"]) and d["related"]["deadline"][0]["key"].startswith("预答辩")
+    assert any(f["key"].startswith("进展·") for f in d["related"]["note"]), "working notes arrive as related notes (the UI mutes them)"
+    assert [t["key"] for t in d["topics"]] == [key] and d["recent_tasks"][0]["id"] == tid and {"headline", "status", "updated_at"} <= set(d["recent_tasks"][0])
+    assert client.get("/api/projects/nope").status_code == 404
+    made = client.post(f"/api/topics/{enc}/project", json={"new_name": "新项目", "new_summary": "一句话"}, headers=H).json()
+    assert made["project"]["name"] == "新项目" and any(x["key"] == "新项目" for x in client.get("/api/projects").json()["projects"])
+    gone = client.post(f"/api/topics/{enc}/project", json={"project_key": None}, headers=H).json()
+    assert gone["ok"] is True and gone["project"] is None and client.get(f"/api/topics/{enc}").json()["project"] is None, "unlink = 不属于任何项目"

@@ -7,7 +7,7 @@ import { pref } from '../core/store.js';
 import { go, setParams } from '../core/router.js';
 import { when, usd, dur, durShort, cut, compact, parseTs, rel, absTime } from '../core/format.js';
 import { icon } from '../ui/icons.js';
-import { card, btn, badge, kwChips, levelBadge, prioIcon, execAvatar, empty, riskBadge, progress, seg, statusDot, skeletonPage, tipAttr } from '../ui/components.js';
+import { card, btn, badge, kwChips, levelBadge, prioIcon, execAvatar, empty, riskBadge, progress, seg, statusDot, skeletonPage, tipAttr, projectChip } from '../ui/components.js';
 import { sparkline, segBar, funnel, hbars, costSpec, mountCostChart, costTable } from '../ui/charts.js';
 import { META, digestOf, levelName, sourceIcon, sourceLabel, purposeLabel, execSlot, catLabel } from '../domain/vocab.js';
 import { evBody } from '../ui/rundetail.js';
@@ -70,7 +70,7 @@ function needsYou(dash, inbox) {
     const more = g.items.length - 4;
     return h`<li class="ny-tp"><details id="nyt-${g.key}"${i === 0 ? raw(' open') : ''}>
       <summary><span class="ny-chev">${icon('chevron-down', { size: 14 })}</span>
-        <span class="ny-tm"><a class="ny-tt" href="#/inbox?sel=${enc(topicSel(g.key))}" data-tip="打开话题：先看前情提要">${g.title}</a>${g.state_now ? h`<span class="ny-state">${g.state_now}</span>` : ''}</span>
+        <span class="ny-tm"><span class="ny-tl"><a class="ny-tt" href="#/inbox?sel=${enc(topicSel(g.key))}" data-tip="打开话题：先看前情提要">${g.title}</a>${projectChip(g.project, { act: 'open-project-inbox', data: { key: g.project?.key }, cls: 'ny-pj' })}</span>${g.state_now ? h`<span class="ny-state">${g.state_now}</span>` : ''}</span>
         <span class="ny-tr">${countChips(g.counts)}${g.oldest_ts ? h`<span class="tg-age tone-${oldTone(g.oldest_ts)}">${icon('clock', { size: 11 })}最早 ${ageWord(g.oldest_ts)}前</span>` : ''}</span></summary>
       <ul class="ny-items">${g.items.slice(0, 4).map(nyItem)}${more > 0 ? h`<li><a class="ny-more" href="#/inbox?sel=${enc(topicSel(g.key))}">还有 ${more} 项，打开话题查看${icon('arrow-right', { size: 12 })}</a></li>` : ''}</ul></details></li>`;
   })}${groups.length > shown.length ? h`<li class="ny-rest"><a href="#/inbox">还有 ${groups.length - shown.length} 个话题 · 共 ${total} 项，打开收件箱${icon('arrow-right', { size: 12 })}</a></li>` : ''}</ul>`

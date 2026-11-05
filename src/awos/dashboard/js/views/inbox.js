@@ -1,4 +1,4 @@
-// 收件箱: items grouped by topic (话题, default) or by type; a topic reader with the 前情提要 and a reading pane for items.
+// 收件箱: items grouped by project (项目, default), topic (话题) or type; a topic reader with the 前情提要 and a reading pane for items.
 import { h } from '../core/html.js';
 import { api } from '../core/api.js';
 import { S, CACHE, cacheTask, cacheApproval } from '../core/state.js';
@@ -70,7 +70,7 @@ ACTS['go-topics'] = () => {
 };
 
 export default {
-  id: 'inbox', title: '收件箱', sub: '按话题归并 · 先看前情提要，再逐项处理', icon: 'inbox', split: true, softParams: ['sel'],
+  id: 'inbox', title: '收件箱', sub: '按项目、话题归并 · 先看背景和前情提要，再逐项处理', icon: 'inbox', split: true, softParams: ['sel'],
   load: () => ctl.load(),
   render: () => { setActiveSplit(ctl); return ctl.render(); },
   mount: () => { setActiveSplit(ctl); ctl.mount(); },

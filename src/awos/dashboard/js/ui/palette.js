@@ -7,6 +7,8 @@ import { go, openTask } from '../core/router.js';
 import { icon } from './icons.js';
 import { kbd, statusIcon } from './components.js';
 import { digestOf, META } from '../domain/vocab.js';
+import { PROJ, loadProjects } from '../domain/projects.js';
+import { cut } from '../core/format.js';
 import { NAV_ITEMS } from '../shell-nav.js';
 
 let open = false;
@@ -31,7 +33,7 @@ export function openPalette(prefill = '') {
     <div class="pal-list" id="pal-list" role="listbox"></div>
     <div class="pal-foot"><span>${kbd('↑ ↓')}选择</span><span>${kbd('Enter')}执行</span><span>${kbd('Esc')}关闭</span></div></div></div>`);
   const input = $('#pal-input'); const list = $('#pal-list');
-  let items = []; let idx = 0; let seq = 0; let timer = null;
+  let items = []; let idx = 0; let seq = 0; let timer = null; let remoteTasks = [];
 
   const actions = () => [
     { id: 'a-new', group: '操作', label: '新建任务', ic: 'plus', hint: 'N', run: () => ACTS['new-task']?.() },
@@ -45,8 +47,10 @@ export function openPalette(prefill = '') {
     const out = [];
     for (const n of NAV_ITEMS) { const s = score(q, n.title, `${n.group} ${n.key}`); if (s) out.push({ id: `v-${n.key}`, group: '跳转', label: n.title, ic: n.icon, hint: n.group, s, run: () => go(n.key) }); }
     for (const a of actions()) { const s = score(q, a.label); if (s) out.push({ ...a, s }); }
+    const pjs = (PROJ.list || []).map((p) => ({ p, s: score(q, `项目：${p.name}`, `${p.summary || ''} 项目 project`) })).filter((x) => x.s);
+    for (const { p, s } of (q ? pjs : pjs.slice(0, 5))) out.push({ id: `p-${p.key}`, group: '项目', label: `项目：${p.name}`, sub: cut(p.summary || '', 70), ic: 'folder', hint: p.open_items ? `${p.open_items} 项待处理` : '', s, run: () => go('inbox', { project: p.key }) });
     for (const t of remote) { const dg = digestOf(t, 'task'); out.push({ id: `t-${t.id}`, group: '任务', label: dg.headline, sub: dg.gist, ic: null, status: t.status, s: 5, run: () => openTask(t.id) }); }
-    const order = { 任务: 0, 跳转: 1, 操作: 2 };
+    const order = { 任务: 0, 项目: 1, 跳转: 2, 操作: 3 };
     return out.sort((a, b) => (order[a.group] - order[b.group]) || b.s - a.s);
   };
   const paint = () => {
@@ -62,7 +66,7 @@ export function openPalette(prefill = '') {
   };
   const update = async () => {
     const q = input.value.trim();
-    items = compute(q); idx = 0; paint();
+    remoteTasks = []; items = compute(q); idx = 0; paint();
     clearTimeout(timer);
     if (q.length >= 2) {
       const my = ++seq;
@@ -70,7 +74,7 @@ export function openPalette(prefill = '') {
         try {
           const d = await api(`/tasks?search=${enc(q)}&limit=8`);
           if (my !== seq || !open) return;
-          items = compute(q, d.tasks); idx = Math.min(idx, items.length - 1); paint();
+          remoteTasks = d.tasks; items = compute(q, remoteTasks); idx = Math.min(idx, items.length - 1); paint();
         } catch { /* offline: local results only */ }
       }, 220);
     }
@@ -97,13 +101,15 @@ export function openPalette(prefill = '') {
   $('.pal-overlay', host).addEventListener('mousedown', (e) => { if (e.target.classList.contains('pal-overlay')) close(); });
   update();
   input.focus();
+  // the project list (cached 20 s, one request at most): so 「项目：…」 can be jumped to
+  loadProjects().then(() => { if (open) { items = compute(input.value.trim(), remoteTasks); idx = Math.min(idx, Math.max(0, items.length - 1)); paint(); } }).catch(() => {});
   if (prefill) input.setSelectionRange(prefill.length, prefill.length);
 }
 
 /* ------------------------------------------------------------------ shortcuts sheet */
 export const SHORTCUTS = [
   ['全局', [['Ctrl K', '命令面板'], ['G 然后 O/B/I/X/W', '跳转：总览 / 看板 / 收件箱 / Outbox / 任务'], ['G 然后 T', '收件箱的话题列表'], ['N', '新建任务'], ['R', '刷新（收件箱里 R = 返工）'], ['[', '折叠 / 展开侧栏'], ['Esc', '关闭抽屉 / 返回'], ['?', '本帮助']]],
-  ['收件箱 / Outbox', [['J / K', '下一条 / 上一条（话题标题也算一条）'], ['[ / ]', '上一个 / 下一个话题'], ['← / →', '折叠 / 展开话题（在事项上按 ← 回到话题）'], ['Enter', '聚焦阅读窗格（话题：第一个推荐选项）'], ['E', '接受 / 验收通过 / 批准 AI 推荐项'], ['X', '忽略（会询问原因）'], ['S', '稍后处理'], ['R', '返工'], ['#', '取消任务（会询问原因）'], ['U', '标为未读'], ['/', '搜索']]],
+  ['收件箱 / Outbox', [['J / K', '下一条 / 上一条（话题标题也算一条）'], ['[ / ]', '上一个 / 下一个话题'], ['← / →', '折叠 / 展开话题（在事项上按 ← 回到话题）'], ['Enter', '聚焦阅读窗格（话题：第一个推荐选项）'], ['E', '接受 / 验收通过 / 批准 AI 推荐项'], ['X', '忽略（会询问原因）'], ['S', '稍后处理'], ['R', '返工'], ['#', '取消任务（会询问原因）'], ['U', '标为未读'], ['P', '更改话题所属项目（项目：关联 / 新建 / 取消）'], ['/', '搜索']]],
   ['看板', [['拖拽 建议→排队', '接受'], ['拖拽 建议/排队→已忽略', '忽略'], ['Enter', '打开聚焦的卡片']]],
 ];
 ACTS.shortcuts = async () => {

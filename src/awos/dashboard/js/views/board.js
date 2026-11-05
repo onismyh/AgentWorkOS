@@ -7,10 +7,11 @@ import { pref } from '../core/store.js';
 import { openTask } from '../core/router.js';
 import { when, usd, cut, parseTs, absTime } from '../core/format.js';
 import { icon } from '../ui/icons.js';
-import { btn, iconBtn, badge, kwChips, levelBadge, prioIcon, execAvatar, empty, progress, statusIcon, seg, skeletonList, kbd, tipAttr } from '../ui/components.js';
+import { btn, iconBtn, badge, kwChips, levelBadge, prioIcon, execAvatar, empty, progress, statusIcon, seg, skeletonList, kbd, tipAttr, projectChip } from '../ui/components.js';
 import { toast } from '../ui/overlay.js';
 import { META, digestOf, catLabel, effLevel, TERMINAL } from '../domain/vocab.js';
 import { taskAction, taskActionUndoable } from '../domain/actions.js';
+import { loadProjects, projectOfTopic } from '../domain/projects.js';
 
 const COL_VIEW = {
   suggested: { icon: 'circle-dashed', tone: 'brand' }, queued: { icon: 'circle-half', tone: 'muted' }, running: { icon: 'loader', tone: 'brand', spin: true },
@@ -41,26 +42,29 @@ async function fallbackBoard() {
   };
 }
 export async function load() {
-  const d = (await apiOpt('/board')) || (await fallbackBoard());
+  const [board] = await Promise.all([apiOpt('/board'), loadProjects().catch(() => null)]);   // the project list maps topics to projects (chips, lanes)
+  const d = board || (await fallbackBoard());
   d.columns.forEach((c) => c.items.forEach(cacheTask));
   B.data = d;
   return d;
 }
 
 /* ------------------------------------------------------------------ filtering / grouping */
+/** The project name of a card: the canonical project of its topic when known, else the task's own `project` text. */
+const projectName = (t) => projectOfTopic(t.topic_key)?.name || t.project || '';
 const matches = (t) => {
   const f = B.f;
   if (f.q) {
-    const hay = `${t.headline} ${t.title} ${t.gist} ${(t.keywords || []).join(' ')} ${t.project || ''} ${t.topic_title || ''} ${t.id}`.toLowerCase();
+    const hay = `${t.headline} ${t.title} ${t.gist} ${(t.keywords || []).join(' ')} ${projectName(t)} ${t.topic_title || ''} ${t.id}`.toLowerCase();
     if (!hay.includes(f.q.toLowerCase())) return false;
   }
   if (f.level && String(effLevel(t)) !== f.level) return false;
   if (f.category && t.category !== f.category) return false;
-  if (f.project && (t.project || '') !== f.project) return false;
+  if (f.project && projectName(t) !== f.project) return false;
   if (f.executor && (t.executor || '') !== f.executor) return false;
   return true;
 };
-const laneKey = (t) => (B.group === 'topic' ? (t.topic_title || '（无话题）') : B.group === 'level' ? `L${effLevel(t)}` : B.group === 'category' ? catLabel(t.category) : B.group === 'project' ? (t.project || '（无项目）') : '');
+const laneKey = (t) => (B.group === 'topic' ? (t.topic_title || '（无话题）') : B.group === 'level' ? `L${effLevel(t)}` : B.group === 'category' ? catLabel(t.category) : B.group === 'project' ? (projectName(t) || '（无项目）') : '');
 const laneSort = (a, b) => (B.group === 'level' ? a.localeCompare(b) : a.startsWith('（') ? 1 : b.startsWith('（') ? -1 : a.localeCompare(b, 'zh'));
 
 /* ------------------------------------------------------------------ card */
@@ -71,6 +75,7 @@ function quickActions(t, col) {
 }
 export function boardCard(t, col, density) {
   const dg = digestOf(t, 'task');
+  const pj = projectOfTopic(t.topic_key);
   const due = t.due_at ? parseTs(t.due_at) : null;
   const overdue = due && due.getTime() < Date.now() && !TERMINAL.has(t.status);
   const ch = t.children || { total: 0, done: 0 };
@@ -78,10 +83,10 @@ export function boardCard(t, col, density) {
   return h`<article class="bcard${overdue ? ' overdue' : ''}" draggable="true" tabindex="0" role="button" data-act="open-task" data-id="${t.id}" data-col="${col}" data-status="${t.status}" aria-label="${dg.headline}">
     <div class="bc-top">${statusIcon(t.status)}<h4 class="bc-title">${dg.headline}</h4>${quickActions(t, col)}</div>
     ${density === 'comfortable' && dg.gist ? h`<p class="bc-gist">${dg.gist}</p>` : ''}
-    ${t.topic_key ? h`<div class="bc-tp"><button type="button" class="bc-topic" data-act="open-topic" data-key="${t.topic_key}" data-tip="话题：${t.topic_title}（点击查看前情提要）">${icon('layers', { size: 11 })}<span>${t.topic_title}</span></button></div>` : ''}
+    ${t.topic_key ? h`<div class="bc-tp">${projectChip(pj, { act: 'open-project-inbox', data: { key: pj?.key }, cls: 'bc-pj' })}<button type="button" class="bc-topic" data-act="open-topic" data-key="${t.topic_key}" data-tip="话题：${t.topic_title}（点击查看前情提要）">${icon('layers', { size: 11 })}<span>${t.topic_title}</span></button></div>` : ''}
     ${dg.keywords.length ? h`<div class="bc-kws">${kwChips(dg.keywords, { max: density === 'comfortable' ? 4 : 3 })}</div>` : ''}
     <div class="bc-meta">${levelBadge(t)}${prioIcon(t.priority)}<span class="bc-cat">${catLabel(t.category)}</span>${t.status !== primary && META.statusLabel[t.status] && col !== 'running' ? h`<span class="bc-st">${META.statusLabel[t.status]}</span>` : ''}<span class="grow"></span>${t.executor ? execAvatar(t.executor, { size: 20 }) : ''}</div>
-    ${density === 'comfortable' && (t.project || due || t.cost_usd) ? h`<div class="bc-sub">${t.project ? h`<span class="bc-i">${icon('folder', { size: 12 })}${cut(t.project, 16)}</span>` : ''}${due ? h`<span class="bc-i${overdue ? ' tone-crit-ink' : ''}">${icon('calendar', { size: 12 })}${overdue ? '逾期 ' : ''}${absTime(t.due_at)}</span>` : ''}${t.cost_usd ? h`<span class="bc-i">${icon('dollar', { size: 12 })}${usd(t.cost_usd).replace('$', '')}</span>` : ''}</div>` : ''}
+    ${density === 'comfortable' && ((t.project && !pj) || due || t.cost_usd) ? h`<div class="bc-sub">${t.project && !pj ? h`<span class="bc-i">${icon('folder', { size: 12 })}${cut(t.project, 16)}</span>` : ''}${due ? h`<span class="bc-i${overdue ? ' tone-crit-ink' : ''}">${icon('calendar', { size: 12 })}${overdue ? '逾期 ' : ''}${absTime(t.due_at)}</span>` : ''}${t.cost_usd ? h`<span class="bc-i">${icon('dollar', { size: 12 })}${usd(t.cost_usd).replace('$', '')}</span>` : ''}</div>` : ''}
     <div class="bc-foot">${ch.total ? progress(ch.done / ch.total, { label: `${ch.done}/${ch.total}`, tip: `子任务 ${ch.done}/${ch.total} 已完成${ch.running ? `，${ch.running} 个运行中` : ''}` }) : ''}${t.pending_approvals ? badge(`${t.pending_approvals} 待审批`, { tone: 'warn', icon: 'shield-alert', variant: 'soft' }) : ''}<span class="grow"></span><span class="bc-w">${when(t.updated_at, { short: true })}</span></div>
   </article>`;
 }
@@ -126,7 +131,7 @@ function toolbar(d) {
   return h`<div class="toolbar"><div class="search-box">${icon('search', { size: 15 })}<input class="input input-bare" type="search" id="board-q" data-input="board-q" placeholder="筛选卡片：标题、关键词、项目…" value="${B.f.q}" aria-label="筛选卡片" autocomplete="off"></div>
     ${sel('level', '全部等级', [1, 2, 3, 4, 5].filter((n) => all.some((t) => effLevel(t) === n)).map((n) => [n, `L${n} ${(META.levels[n]?.name || '').replace(/^L\d\s*/, '')}`]))}
     ${sel('category', '全部类别', uniq((t) => t.category).map((c) => [c, catLabel(c)]))}
-    ${sel('project', '全部项目', uniq((t) => t.project).map((p) => [p, p]))}
+    ${sel('project', '全部项目', uniq(projectName).map((p) => [p, p]))}
     ${sel('executor', '全部执行器', uniq((t) => t.executor).map((e) => [e, e]))}
     <span class="grow"></span><span class="tb-count muted small">${shown === total ? `${total} 项` : `${shown}/${total} 项`}${d.totals ? ` · 近 7 天完成 ${d.totals.done_7d}` : ''}</span>
     <label class="tb-l muted small">分组</label>${seg(GROUPS, B.group, { act: 'board-group', key: 'g', label: '分组方式' })}

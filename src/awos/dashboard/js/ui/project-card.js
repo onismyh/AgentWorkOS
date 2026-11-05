@@ -8,7 +8,7 @@ import { go } from '../core/router.js';
 import { cut } from '../core/format.js';
 import { icon } from './icons.js';
 import { btn, badge, skel } from './components.js';
-import { dialog, toast } from './overlay.js';
+import { dialog, isDialogOpen, toast } from './overlay.js';
 import { dropTopicCache } from '../domain/topics.js';
 import { FOCUS, REL_KINDS, cachedProject, dropProjectCache, linkSource, loadProject, loadProjects, noteTopicProjects, pickRelated, progressTitle,
   projectOfTopic, projectSlot } from '../domain/projects.js';
@@ -17,7 +17,7 @@ const REL_ICON = Object.fromEntries(REL_KINDS.map((k) => [k.key, k.icon]));
 
 /** One related fact (deadline / person / goal / note): icon, name, value. The AI's working notes are muted. */
 export const relatedRow = (f, { value = 120 } = {}) => h`<li class="pj-rel-i${f.progress ? ' progress' : ''}"><span class="pj-rel-ic" data-tip="${f.progress ? '工作笔记' : (REL_KINDS.find((k) => k.key === f.kind)?.label || '')}">${icon(REL_ICON[f.kind] || 'file-text', { size: 13 })}</span>
-  <span class="pj-rel-t"><b>${f.progress ? progressTitle(f.key) : f.key}</b><span class="pj-rel-v">${cut(f.value, value)}</span></span></li>`;
+  <span class="pj-rel-t"><b>${f.progress ? progressTitle(f.key) : f.key}</b><span class="pj-rel-v">${cut(f.progress ? String(f.value ?? '').replace(/^[（(][^）)]{1,60}[）)]\s*/, '') : f.value, value)}</span></span></li>`;
 
 /* ------------------------------------------------------------------ the card in the topic reader */
 const linkBadge = (project) => {
@@ -109,9 +109,12 @@ CHANGES['pj-choice'] = (el) => {
  * Pick the project of a topic: an existing one (searchable), a new one (name + one-line description) or none.
  * POST /api/topics/{key}/project, then the caller's view is refreshed. Resolves true when something was saved.
  */
+let opening = false;
 export async function changeProjectDialog({ key, title = '' }) {
+  if (opening || isDialogOpen()) return false;
+  opening = true;
   let list;
-  try { list = await loadProjects({ force: true, maxAge: 3000 }); } catch (e) { toast(`无法读取项目列表：${e.message}`, 'err'); return false; }
+  try { list = await loadProjects({ force: true, maxAge: 3000 }); } catch (e) { toast(`无法读取项目列表：${e.message}`, 'err'); return false; } finally { opening = false; }
   if (list == null) { toast('服务器还不支持项目关联', 'warn'); return false; }
   const cur = projectOfTopic(key);
   const sorted = [...list].sort((a, b) => Number(b.key === cur?.key) - Number(a.key === cur?.key));
@@ -156,8 +159,8 @@ export async function changeProjectDialog({ key, title = '' }) {
   noteTopicProjects([{ key, project: p }]);
   dropTopicCache(key); dropProjectCache();
   loadProjects({ force: true }).catch(() => {});
-  window.dispatchEvent(new CustomEvent('awos:project-linked', { detail: { key } }));
   await S.refresh(true);
+  window.dispatchEvent(new CustomEvent('awos:project-linked', { detail: { key } }));   // the list is fresh: keep the selection visible
   return true;
 }
 
