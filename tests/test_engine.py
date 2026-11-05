@@ -323,3 +323,34 @@ def test_artifact_outside_var_rejected(env, tmp_path):
     outside = tmp_path.parent / "secret.txt"
     with pytest.raises(ValueError):
         repo.add_artifact("bad", path=outside)
+
+
+def test_cli_style_approval_is_picked_up_by_scheduler_tick(env, monkeypatch):
+    """A short-lived process must not run the action in a thread that dies with it; the daemon tick executes it."""
+    from awos import repo
+    from awos.engine.actions import add_manual_task, decide
+    from awos.hitl import outbox
+    fake, tmp = env["fake"], env["tmp"]
+    proj = tmp / "proj2"; proj.mkdir()
+    tid = add_manual_task("写入笔记", "x", level=4, category="doc")
+
+    def do_exec(spec):
+        Path(spec.cwd, "n.md").write_text("hi", encoding="utf-8")
+        payload = {"files": [{"src": "n.md", "dest": str(proj / "n.md")}]}
+        return exec_result(deliverables=[{"path": "n.md", "title": "n", "kind": "draft"}],
+                           proposed_actions=[{"type": "apply_to_project", "title": "apply", "description": "d",
+                                              "risk": "low", "payload_json": json.dumps(payload)}])
+    fake.push("execute", do_exec)
+    drain(5)
+    pend = repo.list_approvals(status="pending", task_id=tid)[0]
+    monkeypatch.setattr(outbox, "EXECUTE_INLINE", False)
+    decide(pend["id"], "approve", via="cli")
+    import time
+    time.sleep(0.3)
+    assert repo.get_approval(pend["id"])["status"] == "approved" and not (proj / "n.md").exists()  # nothing ran inline
+    drain(4)  # scheduler ticks pick it up
+    for _ in range(50):
+        if repo.get_approval(pend["id"])["status"] == "executed":
+            break
+        time.sleep(0.1)
+    assert repo.get_approval(pend["id"])["status"] == "executed" and (proj / "n.md").read_text(encoding="utf-8") == "hi"

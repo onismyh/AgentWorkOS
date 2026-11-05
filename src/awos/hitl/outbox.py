@@ -20,6 +20,10 @@ from ..timeutil import local_now
 
 log = logging.getLogger("awos.outbox")
 
+# Approved actions are normally executed in a background thread right after the decision. Short-lived processes
+# (the CLI) must set this to False: their threads die on exit, so the daemon's scheduler picks the action up instead.
+EXECUTE_INLINE = True
+
 ACTION_OPTIONS = [{"key": "approve", "label": "批准执行", "description": "按载荷原样执行（备注会作为补充指示）"},
                   {"key": "reject", "label": "拒绝", "description": "不执行，任务交还给你"}]
 AGENT_ACTIONS = {"send_email", "notion_write", "calendar_write", "publish", "submit_form", "other", "post_message"}
@@ -146,7 +150,8 @@ def on_decision(approval: dict) -> None:
         maybe_resume(task_id)
     elif kind == "action":
         if approval["status"] == ApprovalStatus.APPROVED:
-            threading.Thread(target=execute_action, args=(approval,), daemon=True, name=f"action-{approval['id']}").start()
+            if EXECUTE_INLINE:
+                threading.Thread(target=execute_action, args=(approval,), daemon=True, name=f"action-{approval['id']}").start()
         else:
             _record_action_result(approval, {"rejected": True, "note": approval.get("decision_note")})
             maybe_resume(task_id)

@@ -96,7 +96,7 @@ def cmd_daemon(args) -> int:
                 if server is not None:
                     server.should_exit = True
                 return
-            time.sleep(2)
+            time.sleep(5)
 
     threading.Thread(target=watch_stop, daemon=True, name="stop-watch").start()
     try:
@@ -110,6 +110,12 @@ def cmd_daemon(args) -> int:
         if lk and lk.get("pid") == os.getpid():
             (_var() / LOCK).unlink(missing_ok=True)
         (_var() / STOP).unlink(missing_ok=True)
+        # Worker threads are non-daemon: without a hard exit, a stopped daemon lingers until its agent runs finish.
+        # Anything interrupted here is requeued by startup_recovery on the next start.
+        from .llm import cancel_all_runs
+        cancel_all_runs()
+        logging.shutdown()
+        os._exit(0)
     return 0
 
 
@@ -137,7 +143,8 @@ def cmd_ensure_running(args) -> int:
         time.sleep(2)
     if sys.platform == "win32":
         # Prefer the registered scheduled task so the daemon is not a child of the short-lived watchdog task.
-        r = subprocess.run(["schtasks", "/Run", "/TN", r"\AgentWorkOS\Daemon"], capture_output=True, text=True)
+        r = subprocess.run(["schtasks", "/Run", "/TN", r"\AgentWorkOS\Daemon"], capture_output=True,
+                           creationflags=0x08000000)  # bytes: schtasks prints in the OEM code page (GBK)
         if r.returncode == 0:
             print("daemon task started via Task Scheduler")
             return 0
@@ -208,8 +215,12 @@ def cmd_inbox(args) -> int:
 
 def cmd_approve(args) -> int:
     from .engine.actions import decide
+    from .hitl import outbox
+    outbox.EXECUTE_INLINE = False  # this process exits right away; the daemon executes approved actions
     a = decide(args.approval_id, args.option, note=args.note, via="cli")
     print(json.dumps({"id": a["id"], "status": a["status"], "decision": a["decision"]}, ensure_ascii=False))
+    if a["status"] == "approved" and a["kind"] == "action":
+        print("queued: the daemon will execute it on its next tick (<= 1 min)")
     return 0
 
 

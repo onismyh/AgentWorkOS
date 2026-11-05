@@ -20,7 +20,7 @@ inbox_drop = "var/inbox-drop"          # drop .md/.txt files here to create inbo
 node_runtime = "runtime/node"          # portable Node >= 22.19 for pi / dsh
 
 [scheduler]
-tick_seconds = 15
+tick_seconds = 60                     # scheduler wake-up; was 15, slowed on user request
 lease_seconds = 300                    # task lease; heartbeat renews it
 max_concurrent_runs = 3
 quiet_hours = ["01:30", "09:30"]       # Beijing time; user works ~12:00-24:00. Only risk=high notifies here
@@ -81,7 +81,7 @@ codex_daily_runs = 60                  # subscription executor: cap number of ru
 
 [sensors.git]
 enabled = true
-interval_minutes = 60
+interval_minutes = 180
 roots = ["D:/papers", "D:/phd", "D:/transfer", "D:/personal"]
 max_depth = 4
 stale_dirty_hours = 48                 # uncommitted changes older than this become a signal
@@ -91,7 +91,7 @@ exclude = []                           # extra absolute paths to skip (AgentWork
 
 [sensors.files]
 enabled = true
-interval_minutes = 120
+interval_minutes = 360
 roots = ["D:/papers", "D:/phd", "D:/transfer"]
 extensions = [".docx", ".doc", ".pptx", ".xlsx", ".pdf", ".md", ".tex", ".txt"]
 lookback_days = 7
@@ -102,30 +102,30 @@ exclude = []
 
 [sensors.agent_history]
 enabled = true
-interval_minutes = 120
+interval_minutes = 360
 lookback_days = 7
 signal_days = 2                        # emit (project, day) signals for today + yesterday; older days -> context only
 
 [sensors.zotero]
 enabled = true
-interval_minutes = 360
+interval_minutes = 720
 data_dir = "D:/zotero"                 # sqlite fallback only; local API on 127.0.0.1:23119 is preferred
 lookback_days = 7                      # first-run window
 
 [sensors.inbox_drop]
 enabled = true
-interval_minutes = 1
+interval_minutes = 10
 
 [sensors.mailmaster]
 enabled = true
-interval_minutes = 30
+interval_minutes = 60
 root = "D:/MailMasterData"             # NetEase Mail Master local store (plain SQLite, read-only)
 lookback_days = 3
 active_hours = ["09:00", "01:30"]
 
 [sensors.gmail]
 enabled = true
-interval_minutes = 180
+interval_minutes = 360
 active_hours = ["09:00", "01:30"]
 lookback_hours = 24
 min_importance = 3                     # items with action=none and no deadline need at least this importance
@@ -133,7 +133,7 @@ timeout_s = 600
 
 [sensors.notion]
 enabled = true
-interval_minutes = 180
+interval_minutes = 720
 active_hours = ["09:00", "01:30"]
 recent_days = 3
 ahead_days = 14

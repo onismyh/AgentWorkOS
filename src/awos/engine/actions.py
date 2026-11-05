@@ -88,12 +88,26 @@ def cancel_task(task_id: str, actor: str = "user", reason: str | None = None) ->
         repo.set_approval_status(a["id"], "cancelled", expect="pending")
     _stop_side_effects(task_id)
     repo.set_task_status(task_id, TaskStatus.CANCELLED, reason or "cancelled by user", actor=actor, force=True)
+    learn_from_feedback(task_id, "取消", reason, actor)
 
 
 def dismiss_task(task_id: str, actor: str = "user", reason: str | None = None) -> None:
     cancel_task_runs(task_id)
     _stop_side_effects(task_id)
     repo.set_task_status(task_id, TaskStatus.DISMISSED, reason or "dismissed", actor=actor, force=True)
+    learn_from_feedback(task_id, "忽略", reason, actor)
+
+
+def learn_from_feedback(task_id: str, action: str, reason: str | None, actor: str) -> None:
+    """The human's reason for cancelling/dismissing is the strongest preference signal there is: keep it as a
+    pinned context fact so triage stops re-suggesting the same thing and the context refresh can generalize it."""
+    reason = (reason or "").strip()
+    if actor != "user" or len(reason) < 2 or reason in ("dismissed", "cancelled by user", "parent cancelled"):
+        return
+    t = repo.get_task(task_id) or {}
+    title = (t.get("title") or task_id)[:60]
+    repo.upsert_fact("note", f"反馈·{title[:30]}", f"用户{action}了任务「{title}」，原因：{reason}"[:400],
+                     source="user-feedback", confidence=1.0, actor="user", pinned=True)
 
 
 def snooze_task(task_id: str, hours: float = 24, actor: str = "user") -> None:

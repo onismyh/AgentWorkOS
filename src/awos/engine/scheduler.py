@@ -62,6 +62,7 @@ class Scheduler:
         from ..hitl.outbox import expire_approvals
         expire_approvals()
         self._unblock()
+        self._run_approved_actions()
         dispatched = self._dispatch()
         self._recover_expired()
         self._daily_jobs()
@@ -117,6 +118,13 @@ class Scheduler:
                     on_task_finished(kids[-1]["id"])
             elif not repo.dependencies(t["id"]):
                 repo.set_task_status(t["id"], TaskStatus.READY, "no remaining blockers")
+
+    def _run_approved_actions(self) -> None:
+        """Execute actions that were approved elsewhere (CLI) or whose inline thread never started."""
+        from ..hitl.outbox import execute_action
+        for a in repo.list_approvals(status="approved", limit=50):
+            if a["kind"] == "action":
+                self._background(f"action:{a['id']}", execute_action, a)
 
     def _executor_ok(self, task: dict) -> bool:
         return True

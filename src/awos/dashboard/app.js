@@ -329,7 +329,7 @@ function afterRender(root) {
 /* ======================================================================== live refresh */
 
 let refreshTimer = null;
-function scheduleRefresh(delay = 700) { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refreshNow(false), delay); }
+function scheduleRefresh(delay = 3000) { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refreshNow(false), delay); }
 function isEditing() {
   const a = document.activeElement;
   if (a && a.matches('input:not([data-filter]), textarea, select:not([data-filter])') && a.closest('#view, #drawer')) return true;
@@ -956,7 +956,7 @@ function startRunPoll() {
   stopRunPoll();
   const d = S.drawerData;
   if (!d?.run || !['running', 'queued'].includes(d.run.status)) return;
-  S.runPoll = setInterval(pollRun, 2000);
+  S.runPoll = setInterval(pollRun, 5000);
 }
 async function pollRun() {
   const d = S.drawerData;
@@ -1563,7 +1563,7 @@ async function boot() {
   refreshBadges();
   refreshHealth();
   connectLive();
-  setInterval(() => { refreshHealth(); if (S.live) refreshBadges(); else refreshNow(false); }, 20000);
+  setInterval(() => { refreshHealth(); if (S.live) refreshBadges(); else refreshNow(false); }, 60000);
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') boot();

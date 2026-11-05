@@ -29,6 +29,12 @@ def context_brief(max_chars: int = 3500) -> str:
     for f in facts:
         by_kind.setdefault(f["kind"], []).append(f)
     limits = {"project": 10, "person": 5, "note": 5, "interest": 6}
+    feedback = [f for f in by_kind.get("note", []) if f["key"].startswith("反馈·")]
+    if feedback:
+        by_kind["note"] = [f for f in by_kind["note"] if not f["key"].startswith("反馈·")]
+        lines.append("### 用户对任务的反馈（强信号：用户说不用管/已处理的主题，不要再建同类任务）")
+        for f in sorted(feedback, key=lambda x: x["updated_at"], reverse=True)[:20]:
+            lines.append(f"- {f['value']}")
     for kind in KIND_ORDER:
         items = by_kind.get(kind) or []
         if not items:

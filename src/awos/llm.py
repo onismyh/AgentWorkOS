@@ -42,6 +42,17 @@ def cancel_run(run_id: str) -> bool:
     return False
 
 
+def cancel_all_runs() -> int:
+    """Signal every in-flight run to stop (daemon shutdown); each adapter then kills its process tree."""
+    with _cancels_lock:
+        events = list(_cancels.values())
+    for ev in events:
+        ev.set()
+    if events:
+        time.sleep(3)  # give adapters a moment to kill their process trees before the hard exit
+    return len(events)
+
+
 def executor_enabled(name: str) -> bool:
     return bool(load_config().get(f"executors.{name}.enabled", False))
 
