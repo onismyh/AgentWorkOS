@@ -174,12 +174,21 @@ For each relevant page return: page_id, title, url, last_edited (ISO 8601), summ
 {{text (≤ 80 chars), date (YYYY-MM-DD or YYYY-MM-DDTHH:MM in Asia/Shanghai, or null), status ("todo",
 "in_progress", "done" or null)}}; at most 20 items per page, earliest first. At most 15 pages, most recently edited first.
 
+EFFORT BUDGET: you may make at most 12 Notion tool calls in total (search + fetch combined). Start with ONE search
+for recently edited pages and one search each for "日程安排", "Week of", "求职" / to-do pages; then fetch only the 5 most
+relevant pages. Do not paginate or explore further. When the budget is spent, STOP and return what you have.
+Return EVERY page you fetched (up to 5), even if none of its entries fall inside the date window: in that case give
+the page with an empty "items" list and a summary of what it is. Only the "items" list is filtered by date.
+Set "complete": false ONLY if a tool call returned an error; hitting the budget alone is "complete": true.
+
 {READ_ONLY_RULES.format(app="Notion")}"""
 
     def collect(self, ctx: SensorContext) -> list[SignalDraft]:
         cfg = ctx.config
         recent, ahead = int(cfg.get("recent_days", 3)), int(cfg.get("ahead_days", 14))
         data = _run(self.prompt(recent, ahead), NOTION_SCHEMA, int(cfg.get("timeout_s", 600)))
+        if data.get("complete") is False and not data.get("pages"):
+            raise RuntimeError("notion: incomplete and empty result (tool budget exhausted); backing off")
         today = local_now().date().isoformat()
         until = (local_now() + timedelta(days=ahead)).date().isoformat()
         out: list[SignalDraft] = []
