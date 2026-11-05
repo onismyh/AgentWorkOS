@@ -106,3 +106,28 @@ def test_ensure_digests_writes_and_refreshes_only_when_text_changes(client, monk
     repo.set_digest("task", t, "我自己写的标题", ["手写"], source="user")
     repo.update_task(t, summary="再变一次")
     assert summarize.ensure_digests()["pending"] == 0                          # user-written digests are never overwritten
+
+
+def test_evidence_and_mail_endpoints_need_the_token(client, monkeypatch):
+    from awos import mailstore, repo
+    sid = repo.add_signal("git", "仓库有 69 个未提交改动", "fp-ev", body="最早已 194 天\n涉及 data/chap02.tex")
+    tid = repo.create_task("整理仓库", status="triaged", source="sensor:git", source_signal_id=sid, meta={"signals": [sid]})
+    assert client.get(f"/api/tasks/{tid}/evidence").status_code == 401           # raw source text: token even for GET
+    assert client.get("/api/mail/read?ref=mail:abc:1").status_code == 401
+    body = client.get(f"/api/tasks/{tid}/evidence", headers=H).json()
+    assert body["mail_count"] == 0 and body["items"][0]["type"] == "signal" and "data/chap02.tex" in body["items"][0]["body"]
+
+    mails = {"mail:aaaaaaaaaaaa:2": dict(ref="mail:aaaaaaaaaaaa:2", subject="Re: URGENT", received_ms=2.0),
+             "mail:aaaaaaaaaaaa:1": dict(ref="mail:aaaaaaaaaaaa:1", subject="URGENT: approval", received_ms=1.0)}
+    for m in mails.values():
+        m.update({"from": "a <a@x.org>", "to": ["me"], "cc": [], "received": "2026-11-04 14:39", "body": "正文" * 3,
+                  "truncated": False, "body_available": True, "has_attachments": False, "account_key": "aaaaaaaaaaaa", "local_id": 1})
+    monkeypatch.setattr(mailstore, "refs_for_task", lambda t: ["mail:aaaaaaaaaaaa:2"])
+    monkeypatch.setattr(mailstore, "thread_refs", lambda ref, **kw: ["mail:aaaaaaaaaaaa:1"])
+    monkeypatch.setattr(mailstore, "read_mail", lambda ref, max_chars=0: mails[ref])
+    ev = client.get(f"/api/tasks/{tid}/evidence", headers=H).json()
+    got = [i for i in ev["items"] if i["type"] == "mail"]
+    assert [m["subject"] for m in got] == ["URGENT: approval", "Re: URGENT"]          # thread, oldest first
+    assert [m["is_source"] for m in got] == [False, True] and ev["mail_count"] == 2
+    assert client.get("/api/mail/read?ref=mail:aaaaaaaaaaaa:2", headers=H).json()["subject"] == "Re: URGENT"
+    assert client.get("/api/tasks/nope/evidence", headers=H).status_code == 404

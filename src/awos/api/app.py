@@ -118,11 +118,17 @@ class SecurityGuard:
         if host not in self.hosts:
             await JSONResponse({"detail": f"host {host!r} not allowed"}, 403)(scope, receive, send)
             return
-        if scope["method"] in self.MUTATING and scope["path"].startswith("/api/"):
+        if (scope["method"] in self.MUTATING and scope["path"].startswith("/api/")) or \
+                (scope["method"] == "GET" and self._sensitive_get(scope["path"])):
             if not hmac.compare_digest(headers.get(b"x-awos-token", b""), self.token):
                 await JSONResponse({"detail": "missing or invalid X-AWOS-Token"}, 401)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+    @staticmethod
+    def _sensitive_get(path: str) -> bool:
+        """Raw mail text (source evidence, mail reader) needs the token even for GET."""
+        return path.startswith("/api/mail/") or (path.startswith("/api/tasks/") and path.endswith("/evidence"))
 
 
 # --------------------------------------------------------------------------- request bodies
@@ -775,6 +781,45 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
             "notes": meta_.get("notes") or [], "signal": signal,
             "allowed_transitions": sorted(v.value for v in TRANSITIONS.get(TaskStatus(t["status"]), set())),
         }
+
+    @app.get("/api/tasks/{task_id}/evidence")
+    def task_evidence(task_id: str) -> dict:
+        """Everything the task was built from, readable in full: source mails (with thread) and other signals.
+        Token-protected GET (see SecurityGuard._sensitive_get)."""
+        t = _require(repo.get_task(task_id), task_id)
+        from .. import mailstore
+        items: list[dict] = []
+        mail_refs = mailstore.refs_for_task(t)
+        meta_ = t.get("meta") if isinstance(t.get("meta"), dict) else {}
+        sig_ids = list(dict.fromkeys(list(meta_.get("signals") or []) + ([t["source_signal_id"]] if t.get("source_signal_id") else [])))
+        for sid in sig_ids[:20]:
+            s = q1("SELECT * FROM signals WHERE id = ?", (sid,))
+            if s and s["source"] != "mailmaster":
+                items.append({"type": "signal", "source": s["source"], "title": s["title"], "body": s.get("body") or "",
+                              "url": s.get("url"), "observed_at": s["observed_at"]})
+        ordered: list[str] = []
+        for r in mail_refs:
+            for x in mailstore.thread_refs(r):
+                if x not in ordered and x not in mail_refs:
+                    ordered.append(x)
+            ordered.append(r)
+        mails = []
+        for r in list(dict.fromkeys(ordered))[-8:]:
+            try:
+                m = mailstore.read_mail(r, max_chars=8000)
+            except (KeyError, ValueError, OSError):
+                continue
+            mails.append({"type": "mail", "ref": m["ref"], "subject": m["subject"], "from": m["from"], "to": m["to"], "cc": m["cc"],
+                          "received": m["received"], "received_ms": m["received_ms"], "body": m["body"], "truncated": m["truncated"],
+                          "body_available": m["body_available"], "has_attachments": m["has_attachments"], "is_source": r in mail_refs})
+        mails.sort(key=lambda m: m["received_ms"])
+        return {"task_id": task_id, "items": items + mails, "mail_count": len(mails)}
+
+    @app.get("/api/mail/read")
+    def mail_read(ref: str, chars: int = 40000) -> dict:
+        """Full text of one local mail (token-protected)."""
+        from .. import mailstore
+        return mailstore.read_mail(ref, max_chars=_clamp(chars, 500, 120000, 40000))
 
     @app.post("/api/tasks", status_code=201)
     def create_task(body: TaskCreate) -> dict:
