@@ -221,3 +221,18 @@ CREATE TABLE IF NOT EXISTS kv (
     value       TEXT,
     updated_at  TEXT NOT NULL
 );
+
+-- Human-readable digest of tasks / approvals shown in the inbox and board: one-line headline, one-line gist and
+-- 3-5 keywords. Written by triage (at creation) or by the cheap digest job; `basis` is a hash of the text it was
+-- derived from so it is regenerated only when the underlying content materially changes.
+CREATE TABLE IF NOT EXISTS digests (
+    entity_type TEXT NOT NULL,                -- task | approval
+    entity_id   TEXT NOT NULL,
+    headline    TEXT NOT NULL,
+    gist        TEXT,
+    keywords    TEXT NOT NULL DEFAULT '[]',   -- json list
+    basis       TEXT,
+    source      TEXT NOT NULL DEFAULT 'llm',  -- triage | llm | user
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (entity_type, entity_id)
+);

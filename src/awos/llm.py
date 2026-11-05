@@ -160,7 +160,7 @@ def run_agent(prompt: str, *, purpose: str, route: str | None = None, executor: 
     if not executor_enabled(name):
         raise RuntimeError(f"executor {name!r} is disabled")
     ex = get_executor(name)
-    if model is None and purpose in ("triage", "sensor") and name == "claude":
+    if model is None and purpose in ("triage", "sensor", "digest") and name == "claude":
         model = cfg.get("executors.claude.triage_model") or None
     if model is None:
         model = cfg.get(f"executors.{name}.model") or None

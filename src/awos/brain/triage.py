@@ -135,6 +135,10 @@ def triage_once(limit: int = 25) -> dict:
         for r in ref_sigs:
             repo.mark_signal(r, "triaged", task_id=tid, note=reason)
         task = repo.get_task(tid)
+        if (item.get("headline") or "").strip():
+            from .summarize import basis_for_task
+            repo.set_digest("task", tid, item["headline"], item.get("keywords") or [], gist=item.get("gist"),
+                            basis=basis_for_task(task), source="triage")
         status, why = _route_status(task, autostart)
         repo.set_task_status(tid, status, why)
         if status == TaskStatus.READY:

@@ -30,7 +30,9 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, repo
+from ..brain import summarize
 from ..bus import bus
+from . import board as board_mod
 from ..config import load_config
 from ..db import loads, parse_ts, q, q1, utcnow
 from ..engine import actions
@@ -729,7 +731,16 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
         rows = [t for t in rows if (not levels or _eff_level(t) in levels) and (not cats or t["category"] in cats)
                 and (not kinds or t["kind"] in kinds)]
         out = _attach_task_context([_brief_task(t, 300) for t in rows])  # type: ignore[misc]
+        summarize.attach(out, "task")
         return {"tasks": out, "total": len(out), "counts": _status_counts()}
+
+    @app.get("/api/board")
+    def board(days: int = 7) -> dict:
+        return board_mod.board(days=_clamp(days, 1, 60, 7))
+
+    @app.get("/api/dashboard")
+    def dashboard(days: int = 14) -> dict:
+        return board_mod.dashboard(days=_clamp(days, 3, 60, 14))
 
     @app.get("/api/tasks/{task_id}")
     def task_detail(task_id: str) -> dict:
@@ -751,7 +762,8 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
             flat.append(n)
             stack.extend(n.get("children") or [])
         return {
-            "task": {**t, "effective_level": _eff_level(t)},
+            "task": {**t, "effective_level": _eff_level(t), **{k: v for k, v in summarize.attach([dict(t)], "task")[0].items()
+                                                              if k in ("headline", "gist", "keywords", "digest_auto")}},
             "parent": _brief_task(repo.get_task(t["parent_id"])) if t.get("parent_id") else None,
             "root": _brief_task(repo.get_task(t["root_id"])) if t.get("root_id") and t["root_id"] not in (task_id, t.get("parent_id")) else None,
             "children": children,
@@ -825,20 +837,24 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
         suggested, failed = bucket("triaged", 1200), bucket("failed", 1200)
         _attach_artifacts(review + handoff)
         _attach_last_error(failed)
+        summarize.attach(pending, "approval")
+        for rows in (review, handoff, suggested, failed):
+            summarize.attach(rows, "task")
         out = {"decisions": [a for a in pending if a["kind"] == "decision"],
                "actions": [a for a in pending if a["kind"] != "decision"],
                "review": review, "handoff": handoff, "suggested": suggested, "failed": failed}
         out["counts"] = {k: len(v) for k, v in out.items()}
+        out["feed"] = board_mod.inbox_feed(pending, review, handoff, suggested, failed)
         return out
 
     @app.get("/api/approvals")
     def approvals(status: str | None = None, task_id: str | None = None, limit: int = 200) -> dict:
         rows = repo.list_approvals(status=_csv(status) or None, task_id=task_id, limit=_clamp(limit, 1, 1000))
-        return {"approvals": _attach_task(rows)}
+        return {"approvals": summarize.attach(_attach_task(rows), "approval")}
 
     @app.get("/api/approvals/{approval_id}")
     def approval_detail(approval_id: str) -> dict:
-        a = _attach_task([_require(repo.get_approval(approval_id), approval_id)])[0]
+        a = summarize.attach(_attach_task([_require(repo.get_approval(approval_id), approval_id)]), "approval")[0]
         return {"approval": a, "task": _brief_task(repo.get_task(a["task_id"]), 4000) if a.get("task_id") else None,
                 "events": repo.list_events("approval", approval_id, limit=100)}
 

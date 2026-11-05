@@ -58,6 +58,7 @@ class Scheduler:
         self._reap()
         self._sensors()
         self._background("triage", self._triage_job)
+        self._digests()
         self._wake_snoozed()
         from ..hitl.outbox import expire_approvals
         expire_approvals()
@@ -67,6 +68,14 @@ class Scheduler:
         self._recover_expired()
         self._daily_jobs()
         return {"dispatched": dispatched, "active": len(self.active)}
+
+    def _digests(self) -> None:
+        """Card summaries for the inbox/board: at most one cheap batch every 5 minutes, only when something is missing."""
+        last = repo.kv_get("digests.last_run")
+        if last and db.parse_ts(last) > datetime.now(timezone.utc) - timedelta(minutes=5):
+            return
+        repo.kv_set("digests.last_run", utcnow())
+        self._background("digests", _digest_cards_job)
 
     def _reap(self) -> None:
         for tid, fut in list(self.active.items()):
@@ -164,6 +173,11 @@ class Scheduler:
             if now.strftime("%H:%M") >= hm and not repo.kv_get(key):
                 repo.kv_set(key, utcnow())
                 self._background(f"digest:{hm}", _digest_job, hm)
+
+
+def _digest_cards_job() -> None:
+    from ..brain.summarize import ensure_digests
+    ensure_digests()
 
 
 def _backup_job(today: str) -> None:

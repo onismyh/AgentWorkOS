@@ -549,3 +549,31 @@ def kv_get(key: str, default: Any = None) -> Any:
 def kv_set(key: str, value: Any) -> None:
     db.get_conn().execute("INSERT INTO kv(key, value, updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET "
                           "value = excluded.value, updated_at = excluded.updated_at", (key, dumps(value), utcnow()))
+
+
+# --------------------------------------------------------------------------- digests (headline / gist / keywords)
+
+
+def get_digests(entity_type: str, ids: list[str]) -> dict[str, dict]:
+    if not ids:
+        return {}
+    out: dict[str, dict] = {}
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        rows = q(f"SELECT * FROM digests WHERE entity_type = ? AND entity_id IN ({','.join('?' for _ in chunk)})",
+                 [entity_type, *chunk])
+        for r in rows:
+            r["keywords"] = loads(r.get("keywords"), []) or []
+            out[r["entity_id"]] = r
+    return out
+
+
+def set_digest(entity_type: str, entity_id: str, headline: str, keywords: list[str], gist: str | None = None,
+               basis: str | None = None, source: str = "llm") -> None:
+    kws = [str(k).strip()[:24] for k in keywords if str(k).strip()][:6]
+    with tx() as c:
+        c.execute("INSERT INTO digests(entity_type, entity_id, headline, gist, keywords, basis, source, updated_at) "
+                  "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(entity_type, entity_id) DO UPDATE SET headline = excluded.headline, "
+                  "gist = excluded.gist, keywords = excluded.keywords, basis = excluded.basis, source = excluded.source, "
+                  "updated_at = excluded.updated_at",
+                  (entity_type, entity_id, headline.strip()[:80], (gist or "").strip()[:160] or None, dumps(kws), basis, source, utcnow()))

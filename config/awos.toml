@@ -73,14 +73,16 @@ research = ["codex", "claude"]
 writing = ["claude", "codex"]
 doc = ["claude", "codex"]
 data = ["codex", "claude"]
-pm = ["claude", "codex"]
-schedule = ["claude", "codex"]
-comms = ["claude", "codex"]
-admin = ["claude", "codex"]
-career = ["claude", "codex"]
+# Cost control: routine categories go to Codex first (subscription, no marginal cost); Claude (pay-per-use,
+# ~$0.47 per execute run) stays first only for writing/doc, where it is clearly better.
+pm = ["codex", "claude"]
+schedule = ["codex", "claude"]
+comms = ["codex", "claude"]
+admin = ["codex", "claude"]
+career = ["codex", "claude"]
 learning = ["codex", "claude"]
 system = ["codex", "claude"]
-other = ["claude", "codex"]
+other = ["codex", "claude"]
 
 [budget]
 daily_usd = 8.0                        # pay-per-use executors (claude); hard stop when exceeded

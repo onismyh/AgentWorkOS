@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -57,6 +58,8 @@ def _in_active_hours(cfg: dict) -> bool:
 
 
 def is_due(name: str) -> bool:
+    if os.environ.get("AWOS_DISABLE_SENSORS") == "1":  # test isolation: scheduled runs must never reach real services
+        return False
     cfg = load_config().section(f"sensors.{name}") if load_config().get(f"sensors.{name}") else {}
     if not cfg.get("enabled", False):
         return False
