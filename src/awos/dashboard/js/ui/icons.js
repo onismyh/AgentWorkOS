@@ -1,4 +1,4 @@
-// Inline icon set in the style of Lucide (https://lucide.dev, ISC/MIT): 24px grid, stroke 1.75, round caps/joins.
+// Inline icon set in the style of Lucide (lucide.dev, ISC/MIT): 24px grid, stroke 1.75, round caps/joins.
 import { raw } from '../core/html.js';
 
 const P = {
@@ -92,7 +92,10 @@ export const ICON_NAMES = Object.keys(P);
 
 /** Inline SVG (Safe). Decorative by default; pass label to expose it to assistive tech. */
 export function icon(name, { size = 16, cls = '', label = '' } = {}) {
-  const body = P[name] || P.circle;
-  const a11y = label ? `role="img" aria-label="${label.replace(/[&<>"']/g, '')}"` : 'aria-hidden="true"';
-  return raw(`<svg class="ic ic-${name}${cls ? ` ${cls}` : ''}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" ${a11y}>${body}</svg>`);
+  const key = P[name] ? name : 'circle';
+  const body = P[key];
+  const a11y = label ? `role="img" aria-label="${String(label).replace(/[^\w一-鿿 ·:/-]/g, '')}"` : 'aria-hidden="true"';
+  const klass = String(cls).replace(/[^\w -]/g, '');
+  const px = Number(size) || 16;
+  return raw(`<svg class="ic ic-${key}${klass ? ` ${klass}` : ''}" width="${px}" height="${px}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" ${a11y}>${body}</svg>`);
 }

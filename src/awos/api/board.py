@@ -170,7 +170,8 @@ def dashboard(days: int = 14) -> dict:
         "kpis": kpis,
         "series": {"days": labels, "tasks_created": series("tasks", "created_at", "parent_id IS NULL"),
                    "tasks_done": series("tasks", "finished_at", "status = 'done' AND parent_id IS NULL"),
-                   "signals": series("signals", "observed_at"), "runs": series("runs", "started_at"), "cost": cost},
+                   "signals": series("signals", "observed_at"), "runs": series("runs", "started_at"),
+                   "failures": series("runs", "started_at", "status IN ('failed','timeout','interrupted')"), "cost": cost},
         "levels": levels,
         "categories": [{"key": k, "label": CATEGORIES.get(k, k).split(" / ")[0].split("（")[0], "count": n}
                        for k, n in sorted(cats.items(), key=lambda x: -x[1])],

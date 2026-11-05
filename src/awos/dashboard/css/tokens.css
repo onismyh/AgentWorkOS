@@ -1,0 +1,73 @@
+/* Design tokens. shadcn/ui language: zinc neutrals, 1px hairlines instead of shadows, 0.5rem radius, restrained accent.
+   Data colours follow the dataviz palette (validated against --surface in both themes). */
+:root {
+  color-scheme: light;
+  --bg: #fafafa;
+  --surface: #ffffff;          /* cards, popovers, charts */
+  --surface-2: #f4f4f5;        /* muted wells, hover */
+  --surface-3: #e9e9ec;
+  --fg: #09090b;
+  --fg-2: #3f3f46;
+  --muted-fg: #63636c;         /* 5.4:1 on surface-2, 5.9:1 on surface */
+  --faint: #8b8b94;            /* decorative only (>=3:1) */
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --hover: #f4f4f5;
+  --primary: #18181b;
+  --primary-fg: #fafafa;
+  --primary-hover: #27272a;
+  --brand: #2a78d6;
+  --brand-ink: #1c5cab;
+  --brand-soft: #eaf2fd;
+  --brand-soft-border: #cfe1f8;
+  --ring: #2a78d6;
+  --good: #0ca30c; --good-ink: #006300; --good-soft: #eaf7ea;
+  --warn: #fab219; --warn-ink: #8a5a00; --warn-soft: #fff8e6;
+  --crit: #d03b3b; --crit-ink: #b02a2a; --crit-soft: #fdeeee;
+  /* categorical series (fixed identity per executor: codex, claude, pi, dsh, internal) */
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+  /* ordinal ramp (L1..L5 and funnel stages): one hue, light -> dark */
+  --l1: #86b6ef; --l2: #5598e7; --l3: #256abf; --l4: #184f95; --l5: #0d366b;
+  --l1-ink: #0b0b0b; --l2-ink: #0b0b0b; --l3-ink: #ffffff; --l4-ink: #ffffff; --l5-ink: #ffffff;
+  --spark: #a1a1aa;
+  --shadow-pop: 0 8px 30px rgba(9, 9, 11, 0.14), 0 1px 3px rgba(9, 9, 11, 0.06);
+  --overlay: rgba(9, 9, 11, 0.45);
+  --r: 8px; --r-sm: 6px; --r-lg: 12px; --r-pill: 999px;
+  --font: Inter, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Microsoft YaHei UI", monospace;
+  --sidebar-w: 232px; --sidebar-w-c: 56px; --topbar-h: 52px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #09090b; --surface: #111113; --surface-2: #18181b; --surface-3: #232327;
+    --fg: #fafafa; --fg-2: #d4d4d8; --muted-fg: #a1a1aa; --faint: #71717a;
+    --border: #27272a; --border-strong: #3f3f46; --hover: #1c1c1f;
+    --primary: #fafafa; --primary-fg: #18181b; --primary-hover: #e4e4e7;
+    --brand: #3987e5; --brand-ink: #86b6ef; --brand-soft: #0f1f33; --brand-soft-border: #1c3a5e; --ring: #6da7ec;
+    --good-ink: #3fbf3f; --good-soft: #0f2415; --warn-ink: #fab219; --warn-soft: #2a2110; --crit-ink: #e66767; --crit-soft: #2a1414;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+    --l1: #184f95; --l2: #256abf; --l3: #3987e5; --l4: #6da7ec; --l5: #9ec5f4;
+    --l1-ink: #ffffff; --l2-ink: #ffffff; --l3-ink: #0b0b0b; --l4-ink: #0b0b0b; --l5-ink: #0b0b0b;
+    --spark: #71717a;
+    --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --overlay: rgba(0, 0, 0, 0.62);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #09090b; --surface: #111113; --surface-2: #18181b; --surface-3: #232327;
+  --fg: #fafafa; --fg-2: #d4d4d8; --muted-fg: #a1a1aa; --faint: #71717a;
+  --border: #27272a; --border-strong: #3f3f46; --hover: #1c1c1f;
+  --primary: #fafafa; --primary-fg: #18181b; --primary-hover: #e4e4e7;
+  --brand: #3987e5; --brand-ink: #86b6ef; --brand-soft: #0f1f33; --brand-soft-border: #1c3a5e; --ring: #6da7ec;
+  --good-ink: #3fbf3f; --good-soft: #0f2415; --warn-ink: #fab219; --warn-soft: #2a2110; --crit-ink: #e66767; --crit-soft: #2a1414;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  --l1: #184f95; --l2: #256abf; --l3: #3987e5; --l4: #6da7ec; --l5: #9ec5f4;
+  --l1-ink: #ffffff; --l2-ink: #ffffff; --l3-ink: #0b0b0b; --l4-ink: #0b0b0b; --l5-ink: #0b0b0b;
+  --spark: #71717a;
+  --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --overlay: rgba(0, 0, 0, 0.62);
+}

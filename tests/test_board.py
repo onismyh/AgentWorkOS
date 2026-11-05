@@ -131,3 +131,12 @@ def test_evidence_and_mail_endpoints_need_the_token(client, monkeypatch):
     assert [m["is_source"] for m in got] == [False, True] and ev["mail_count"] == 2
     assert client.get("/api/mail/read?ref=mail:aaaaaaaaaaaa:2", headers=H).json()["subject"] == "Re: URGENT"
     assert client.get("/api/tasks/nope/evidence", headers=H).status_code == 404
+
+
+def test_meta_timezone_and_failure_series(client):
+    from awos import repo
+    rid = repo.create_run("execute", "codex")
+    repo.update_run(rid, status="failed", started_at=repo.utcnow())
+    assert client.get("/api/meta").json()["timezone"] == "Asia/Shanghai"
+    d = client.get("/api/dashboard?days=5").json()
+    assert len(d["series"]["failures"]) == 5 and sum(d["series"]["failures"]) == 1

@@ -703,7 +703,7 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
     @app.get("/api/meta")
     def meta() -> dict:
         return {
-            "version": __version__, "levels": LEVELS, "categories": CATEGORIES, "kinds": KINDS,
+            "version": __version__, "timezone": str(cfg.get("timezone", "Asia/Shanghai")), "levels": LEVELS, "categories": CATEGORIES, "kinds": KINDS,
             "task_statuses": [{"key": s.value, "label": TASK_STATUS_LABELS.get(s.value, s.value)} for s in TaskStatus],
             "run_statuses": [{"key": s.value, "label": RUN_STATUS_LABELS.get(s.value, s.value)} for s in RunStatus],
             "approval_statuses": [{"key": s.value, "label": APPROVAL_STATUS_LABELS.get(s.value, s.value)} for s in ApprovalStatus],

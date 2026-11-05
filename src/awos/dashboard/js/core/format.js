@@ -1,18 +1,21 @@
 // Formatting helpers (pure; no DOM access at import time).
 import { h, raw } from './html.js';
 
+/** Display timezone from /api/meta (the browser clock may differ from the user's configured zone). */
+export const TZ = { name: undefined };
+
 export const parseTs = (s) => { if (!s) return null; const d = new Date(s); return Number.isNaN(d.getTime()) ? null : d; };
 
 export function absTime(s, withYear = false) {
   const d = parseTs(s);
   if (!d) return '—';
-  const o = { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false };
+  const o = { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ.name };
   if (withYear || d.getFullYear() !== new Date().getFullYear()) o.year = 'numeric';
   return d.toLocaleString('zh-CN', o);
 }
 export function dayLabel(s) {
   const d = parseTs(s);
-  return d ? d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '—';
+  return d ? d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric', timeZone: TZ.name }) : '—';
 }
 
 /** Relative time in Chinese: "5 分钟前" / "2 小时后". */
