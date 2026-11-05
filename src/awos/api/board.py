@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .. import repo
-from ..brain import summarize
+from ..brain import summarize, topics as topics_mod
 from ..db import loads, q
 from ..models import CATEGORIES, EXECUTORS
 from ..timeutil import local_now, local_today, tz
@@ -89,6 +89,10 @@ def board(days: int = 7, limit_per_column: int = 60) -> dict:
         total = len(items)
         items = summarize.attach(items[:limit_per_column], "task")
         out.append({**c, "count": total, "items": items})
+    topic_of = topics_mod.resolve([r for r in rows])
+    for col in out:
+        for it in col["items"]:
+            it["topic_key"], it["topic_title"] = topic_of.get(it["id"], ("c:other", "其他"))
     return {"columns": out, "updated_at": _utc(datetime.now(timezone.utc)),
             "totals": {"open": sum(len(cols[k]) for k in ("suggested", "queued", "running", "needs_you")), "done_7d": len(cols["done"])}}
 

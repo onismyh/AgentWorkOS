@@ -577,3 +577,49 @@ def set_digest(entity_type: str, entity_id: str, headline: str, keywords: list[s
                   "gist = excluded.gist, keywords = excluded.keywords, basis = excluded.basis, source = excluded.source, "
                   "updated_at = excluded.updated_at",
                   (entity_type, entity_id, headline.strip()[:80], (gist or "").strip()[:160] or None, dumps(kws), basis, source, utcnow()))
+
+
+# --------------------------------------------------------------------------- topics
+
+
+def get_topic(key: str) -> dict | None:
+    row = q1("SELECT * FROM topics WHERE key = ?", (key,))
+    if row:
+        row["brief"] = loads(row.get("brief"), None)
+    return row
+
+
+def list_topics() -> list[dict]:
+    rows = q("SELECT * FROM topics")
+    for r in rows:
+        r["brief"] = loads(r.get("brief"), None)
+    return rows
+
+
+def upsert_topic(key: str, title: str, source: str = "llm") -> None:
+    now = utcnow()
+    with tx() as c:
+        c.execute("INSERT INTO topics(key, title, source, created_at, updated_at) VALUES(?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                  "title = CASE WHEN topics.source = 'user' THEN topics.title ELSE excluded.title END, updated_at = excluded.updated_at",
+                  (key, title.strip()[:60], source, now, now))
+
+
+def assign_topic(entity_type: str, entity_id: str, topic_key: str) -> None:
+    with tx() as c:
+        c.execute("INSERT INTO topic_items(entity_type, entity_id, topic_key, updated_at) VALUES(?,?,?,?) ON CONFLICT(entity_type, entity_id) "
+                  "DO UPDATE SET topic_key = excluded.topic_key, updated_at = excluded.updated_at", (entity_type, entity_id, topic_key, utcnow()))
+
+
+def topic_assignments(entity_type: str, ids: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        for r in q(f"SELECT entity_id, topic_key FROM topic_items WHERE entity_type = ? AND entity_id IN ({','.join('?' for _ in chunk)})",
+                   [entity_type, *chunk]):
+            out[r["entity_id"]] = r["topic_key"]
+    return out
+
+
+def save_brief(key: str, brief: dict, basis: str) -> None:
+    db.update("topics", "key", key, {"brief": dumps(brief), "brief_basis": basis, "brief_updated_at": utcnow(), "updated_at": utcnow()})
+    log_event("topic", key, "brief_updated", {"asks": len(brief.get("asks") or []), "recap": len(brief.get("recap") or [])}, actor="agent:brief")

@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, repo
-from ..brain import summarize
+from ..brain import summarize, topics as topics_mod
 from ..bus import bus
 from . import board as board_mod
 from ..config import load_config
@@ -768,8 +768,8 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
             flat.append(n)
             stack.extend(n.get("children") or [])
         return {
-            "task": {**t, "effective_level": _eff_level(t), **{k: v for k, v in summarize.attach([dict(t)], "task")[0].items()
-                                                              if k in ("headline", "gist", "keywords", "digest_auto")}},
+            "task": {**t, "effective_level": _eff_level(t), "topic": topics_mod.topic_for_task(task_id),
+                     **{k: v for k, v in summarize.attach([dict(t)], "task")[0].items() if k in ("headline", "gist", "keywords", "digest_auto")}},
             "parent": _brief_task(repo.get_task(t["parent_id"])) if t.get("parent_id") else None,
             "root": _brief_task(repo.get_task(t["root_id"])) if t.get("root_id") and t["root_id"] not in (task_id, t.get("parent_id")) else None,
             "children": children,
@@ -871,8 +871,7 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
 
     # ------------------------------------------------------------------ inbox / outbox
 
-    @app.get("/api/inbox")
-    def inbox() -> dict:
+    def _inbox_data() -> dict:
         pending = _attach_task(repo.list_approvals(status=ApprovalStatus.PENDING, limit=500))
 
         def bucket(status: str, text_limit: int) -> list[dict]:
@@ -889,8 +888,27 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
                "actions": [a for a in pending if a["kind"] != "decision"],
                "review": review, "handoff": handoff, "suggested": suggested, "failed": failed}
         out["counts"] = {k: len(v) for k, v in out.items()}
-        out["feed"] = board_mod.inbox_feed(pending, review, handoff, suggested, failed)
+        out["feed"] = topics_mod.attach_to_feed(board_mod.inbox_feed(pending, review, handoff, suggested, failed))
+        out["topics"] = topics_mod.topic_summaries(out["feed"])
         return out
+
+    @app.get("/api/inbox")
+    def inbox() -> dict:
+        return _inbox_data()
+
+    @app.get("/api/topics")
+    def topics_list() -> dict:
+        return {"topics": _inbox_data()["topics"]}
+
+    @app.get("/api/topics/{key}")
+    def topic_detail(key: str) -> dict:
+        return _require(topics_mod.topic_view(key, _inbox_data()["feed"]), key)
+
+    @app.post("/api/topics/{key}/refresh", status_code=202)
+    def topic_refresh(key: str) -> dict:
+        _require(repo.get_topic(key), key)
+        threading.Thread(target=topics_mod.generate_brief, args=(key,), daemon=True, name=f"brief-{key}").start()
+        return {"ok": True, "queued": True}
 
     @app.get("/api/approvals")
     def approvals(status: str | None = None, task_id: str | None = None, limit: int = 200) -> dict:
@@ -900,6 +918,7 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
     @app.get("/api/approvals/{approval_id}")
     def approval_detail(approval_id: str) -> dict:
         a = summarize.attach(_attach_task([_require(repo.get_approval(approval_id), approval_id)]), "approval")[0]
+        a["topic"] = topics_mod.topic_for_task(a["task_id"]) if a.get("task_id") else None
         return {"approval": a, "task": _brief_task(repo.get_task(a["task_id"]), 4000) if a.get("task_id") else None,
                 "events": repo.list_events("approval", approval_id, limit=100)}
 

@@ -61,8 +61,8 @@ def _move(task_id: str, owner: str, status: str, reason: str, **extra) -> bool:
 def _notify(title: str, body: str, *, level: str = "action", ref_type: str = "task", ref_id: str | None = None,
             path: str = "") -> None:
     try:
-        from ..hitl.notify import dashboard_url, notify
-        notify(title, body, level=level, ref_type=ref_type, ref_id=ref_id, url=dashboard_url(path))
+        from ..hitl.batcher import enqueue  # one combined reminder per topic window, not one toast per event
+        enqueue(title, body, level=level, ref_type=ref_type, ref_id=ref_id)
     except Exception as e:  # notifications are best effort
         log.warning("notify failed: %s", e)
 

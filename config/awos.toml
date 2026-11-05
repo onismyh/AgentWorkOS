@@ -65,6 +65,8 @@ timeout_seconds = 1500
 # readonly: L1/L2 analysis on non-personal categories (dev/research/learning/data/pm) -> cheap DeepSeek executors first
 readonly = ["dsh", "pi", "codex", "claude"]
 verify = ["dsh", "pi", "codex", "claude"]
+# topic recaps contain the user's mail/repo context: only the executors already trusted with it (Codex is free per run)
+brief = ["codex", "claude"]
 # category -> preferred executor order (first enabled wins). Planner/triage may override per task.
 triage = ["claude", "codex"]
 plan = ["codex", "claude"]

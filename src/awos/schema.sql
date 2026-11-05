@@ -236,3 +236,24 @@ CREATE TABLE IF NOT EXISTS digests (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (entity_type, entity_id)
 );
+
+-- Topics: the things the user actually cares about (a repo, a paper, a job application, ...). Several tasks and their
+-- approvals belong to one topic so the inbox can show them together with ONE recap instead of N separate threads.
+CREATE TABLE IF NOT EXISTS topics (
+    key              TEXT PRIMARY KEY,         -- stable slug (llm-chosen) or p:<project> / c:<category> fallback
+    title            TEXT NOT NULL,
+    brief            TEXT,                     -- json {state_now, recap:[{ts,text}], asks:[{id,question,why_now,stakes}]}
+    brief_basis      TEXT,                     -- hash of the open items/statuses the brief was written for
+    brief_updated_at TEXT,
+    source           TEXT NOT NULL DEFAULT 'llm',   -- llm | fallback | user
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS topic_items (
+    entity_type TEXT NOT NULL,                -- task (approvals follow their task)
+    entity_id   TEXT NOT NULL,
+    topic_key   TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (entity_type, entity_id)
+);
+CREATE INDEX IF NOT EXISTS ix_topic_items_key ON topic_items(topic_key);

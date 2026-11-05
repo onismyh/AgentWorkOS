@@ -110,7 +110,7 @@ def create_budget_approval(task: dict, error: str) -> str:
 
 
 def notify_pending(approval_ids: list[str]) -> None:
-    from .notify import dashboard_url, notify
+    from .batcher import enqueue
     items = [repo.get_approval(a) for a in approval_ids]
     items = [i for i in items if i]
     if not items:
@@ -119,7 +119,7 @@ def notify_pending(approval_ids: list[str]) -> None:
     title = f"待你确认（{len(items)}）：{items[0]['title'][:40]}"
     body = "\n".join(f"• {i['title'][:60]}（建议：{(i.get('recommendation') or '-')[:40]}）" for i in items[:5])
     try:
-        notify(title, body, level="high" if high else "action", ref_type="approval", ref_id=items[0]["id"], url=dashboard_url("outbox"))
+        enqueue(title, body, level="high" if high else "action", ref_type="approval", ref_id=items[0]["id"])
         for i in items:
             repo.db.update("approvals", "id", i["id"], {"notified_at": utcnow()})
     except Exception as e:

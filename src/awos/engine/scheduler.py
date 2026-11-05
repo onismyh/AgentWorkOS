@@ -59,6 +59,8 @@ class Scheduler:
         self._sensors()
         self._background("triage", self._triage_job)
         self._digests()
+        self._topics()
+        self._flush_reminders()
         self._wake_snoozed()
         from ..hitl.outbox import expire_approvals
         expire_approvals()
@@ -76,6 +78,22 @@ class Scheduler:
             return
         repo.kv_set("digests.last_run", utcnow())
         self._background("digests", _digest_cards_job)
+
+    @staticmethod
+    def _flush_reminders() -> None:
+        from ..hitl.batcher import flush
+        try:
+            flush()
+        except Exception:
+            log.exception("reminder flush failed")
+
+    def _topics(self) -> None:
+        """Group new items into topics and refresh stale topic briefs (recaps): throttled to once per 5 minutes."""
+        last = repo.kv_get("topics.last_run")
+        if last and db.parse_ts(last) > datetime.now(timezone.utc) - timedelta(minutes=5):
+            return
+        repo.kv_set("topics.last_run", utcnow())
+        self._background("topics", _topics_job)
 
     def _reap(self) -> None:
         for tid, fut in list(self.active.items()):
@@ -173,6 +191,12 @@ class Scheduler:
             if now.strftime("%H:%M") >= hm and not repo.kv_get(key):
                 repo.kv_set(key, utcnow())
                 self._background(f"digest:{hm}", _digest_job, hm)
+
+
+def _topics_job() -> None:
+    from ..brain.topics import ensure_topics, refresh_briefs
+    ensure_topics()
+    refresh_briefs()
 
 
 def _digest_cards_job() -> None:
