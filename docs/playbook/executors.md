@@ -37,4 +37,4 @@
 ## Pi / DSH 实测（DeepSeek key 已配置）
 - Pi：`deepseek/deepseek-v4-pro`，一个小任务约 4k token / $0.007；事件含 write/read 工具调用；`auth check --provider deepseek` 返回 ready。
 - DSH：默认 provider `deepseek-official`、模型 `deepseek-flash`；usage 在每个 `step_end` 事件里（`inputTokens/outputTokens/cacheReadTokens`），需累加；没有费用字段。
-- Pi 的 `settings.json` 写错转义会被忽略并只给一行警告（我们曾把 `E:\Git` 写成 `E:\Git` 被 shell 吃掉一半反斜杠）——改用 Python `json.dump` 生成。
+- Pi 的 `settings.json` 转义写错会被整个忽略，只给一行警告（`shellPath` 里的反斜杠被 shell 吃掉了一半）——用 Python `json.dump` 生成这个文件，不要手写。
