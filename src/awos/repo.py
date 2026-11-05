@@ -623,3 +623,23 @@ def topic_assignments(entity_type: str, ids: list[str]) -> dict[str, str]:
 def save_brief(key: str, brief: dict, basis: str) -> None:
     db.update("topics", "key", key, {"brief": dumps(brief), "brief_basis": basis, "brief_updated_at": utcnow(), "updated_at": utcnow()})
     log_event("topic", key, "brief_updated", {"asks": len(brief.get("asks") or []), "recap": len(brief.get("recap") or [])}, actor="agent:brief")
+
+
+# --------------------------------------------------------------------------- topic <-> project links
+
+
+def link_topic_project(topic_key: str, project_key: str | None, source: str = "llm") -> None:
+    """Link a topic to a project; project_key=None removes the link (a 'user' unlink is remembered as an empty key)."""
+    with tx() as c:
+        if project_key is None and source != "user":
+            c.execute("DELETE FROM topic_projects WHERE topic_key = ?", (topic_key,))
+        else:
+            c.execute("INSERT INTO topic_projects(topic_key, project_key, source, updated_at) VALUES(?,?,?,?) "
+                      "ON CONFLICT(topic_key) DO UPDATE SET project_key = excluded.project_key, source = excluded.source, updated_at = excluded.updated_at",
+                      (topic_key, project_key or "", source, utcnow()))
+        log_event("topic", topic_key, "project_linked", {"project": project_key, "source": source},
+                  actor="user" if source == "user" else "agent:link", conn=c)
+
+
+def topic_project_links() -> dict[str, dict]:
+    return {r["topic_key"]: r for r in q("SELECT * FROM topic_projects")}

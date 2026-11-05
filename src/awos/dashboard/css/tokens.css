@@ -29,6 +29,8 @@
   /* ordinal ramp (L1..L5 and funnel stages): one hue, light -> dark */
   --l1: #86b6ef; --l2: #5598e7; --l3: #256abf; --l4: #184f95; --l5: #0d366b;
   --l1-ink: #0b0b0b; --l2-ink: #0b0b0b; --l3-ink: #ffffff; --l4-ink: #ffffff; --l5-ink: #ffffff;
+  /* project identity (categorical, 8 slots, validated with the dataviz validator; the name is always printed next to the mark) */
+  --pj1: #2a78d6; --pj2: #eb6834; --pj3: #1baf7a; --pj4: #eda100; --pj5: #e87ba4; --pj6: #008300; --pj7: #6250d6; --pj8: #e34948;
   --spark: #a1a1aa;
   --shadow-pop: 0 8px 30px rgba(9, 9, 11, 0.14), 0 1px 3px rgba(9, 9, 11, 0.06);
   --overlay: rgba(9, 9, 11, 0.45);
@@ -51,6 +53,7 @@
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
     --l1: #184f95; --l2: #256abf; --l3: #3987e5; --l4: #6da7ec; --l5: #9ec5f4;
     --l1-ink: #ffffff; --l2-ink: #ffffff; --l3-ink: #0b0b0b; --l4-ink: #0b0b0b; --l5-ink: #0b0b0b;
+    --pj1: #3987e5; --pj2: #d95926; --pj3: #199e70; --pj4: #c98500; --pj5: #d55181; --pj6: #008300; --pj7: #9085e9; --pj8: #e66767;
     --spark: #71717a;
     --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
     --overlay: rgba(0, 0, 0, 0.62);
@@ -67,6 +70,7 @@
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
   --l1: #184f95; --l2: #256abf; --l3: #3987e5; --l4: #6da7ec; --l5: #9ec5f4;
   --l1-ink: #ffffff; --l2-ink: #ffffff; --l3-ink: #0b0b0b; --l4-ink: #0b0b0b; --l5-ink: #0b0b0b;
+  --pj1: #3987e5; --pj2: #d95926; --pj3: #199e70; --pj4: #c98500; --pj5: #d55181; --pj6: #008300; --pj7: #9085e9; --pj8: #e66767;
   --spark: #71717a;
   --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
   --overlay: rgba(0, 0, 0, 0.62);

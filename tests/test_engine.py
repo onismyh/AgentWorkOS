@@ -140,7 +140,9 @@ def test_signal_to_l3_review_with_deliverable(env):
     assert t["level"] == 3
     arts = repo.list_artifacts(task_id=t["id"])
     assert any(a["title"] == "提交计划" for a in arts)
-    assert repo.list_facts(kind="project")[0]["key"] == "paper"
+    # a task agent may only report PROGRESS: it becomes a rolling note, it never creates a project
+    assert repo.list_facts(kind="project") == []
+    assert [f["key"] for f in repo.list_facts(kind="note")] == ["进展·paper"]
     exec_call = [c for c in fake.calls if c["purpose"] == "execute"][0]
     assert exec_call["sandbox"] == "workspace-write"
     assert "<untrusted>" in exec_call["prompt"]

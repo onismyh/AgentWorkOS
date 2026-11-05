@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, repo
-from ..brain import summarize, topics as topics_mod
+from ..brain import projects as projects_mod, summarize, topics as topics_mod
 from ..bus import bus
 from . import board as board_mod
 from ..config import load_config
@@ -145,6 +145,12 @@ class TaskCreate(BaseModel):
     project: str | None = None
     due_at: str | None = None
     triage: bool = True
+
+
+class TopicProjectBody(BaseModel):
+    project_key: str | None = None
+    new_name: str | None = Field(default=None, max_length=60)
+    new_summary: str | None = Field(default=None, max_length=400)
 
 
 class TaskActionBody(BaseModel):
@@ -903,6 +909,23 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
     @app.get("/api/topics/{key}")
     def topic_detail(key: str) -> dict:
         return _require(topics_mod.topic_view(key, _inbox_data()["feed"]), key)
+
+    @app.get("/api/projects")
+    def projects_list() -> dict:
+        return {"projects": projects_mod.list_projects(_inbox_data()["topics"])}
+
+    @app.get("/api/projects/{key}")
+    def project_detail(key: str) -> dict:
+        return _require(projects_mod.project_detail(key, _inbox_data()["topics"]), key)
+
+    @app.post("/api/topics/{key}/project")
+    def topic_set_project(key: str, body: TopicProjectBody) -> dict:
+        _require(topics_mod.ensure_topic_row(key), key)
+        try:
+            proj = projects_mod.set_topic_project(key, body.project_key or None, body.new_name, body.new_summary)
+        except KeyError as e:
+            raise HTTPException(422, f"unknown project {e.args[0]!r}")
+        return {"ok": True, "project": proj}
 
     @app.post("/api/topics/{key}/dismiss")
     def topic_dismiss(key: str, body: TaskActionBody) -> dict:

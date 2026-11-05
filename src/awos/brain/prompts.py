@@ -124,7 +124,7 @@ EXECUTE = """\
 - 需要对外执行的动作写进 `proposed_actions`，`payload_json` 写成 JSON 字符串，内容要精确到可以直接执行（例如邮件的收件人、主题、正文全文；apply_to_project 写 {{"files":[{{"src":"相对工作目录的路径","dest":"用户目录里的绝对路径"}}]}}）。
 - 查看用户的 git 仓库时直接用 shell：`git -C "<仓库绝对路径>" status --short`、`git -C "<路径>" diff --stat`、`git -C "<路径>" log -n 20 --oneline`（不要用 `cd ...; git ...`，会被拒绝）。git 的写操作（commit、push、checkout、reset）你自己不能执行：提议 `git_commit`（payload：{{"repo":"仓库绝对路径","paths":["要提交的相对路径，不要 git add -A"],"message":"提交说明"}}）或 `git_push`（payload：{{"repo":"仓库绝对路径","remote":"origin","branch":"分支名"}}），用户批准后由系统代为执行。提交前先用上面的只读命令确认改动内容，不要提交 __pycache__、*.pyc、日志、密钥、大体积中间产物。
 - 如果发现任务太大，需要拆分成并行子任务，就在 `subtasks` 里给出拆分（status 填 partial），系统会创建子任务并行执行，最后再交还给你汇总。
-- 发现了用户上下文的新信息（项目进展、截止日期、偏好）就写进 `context_updates`。
+- 发现了用户上下文的新信息（项目进展、截止日期、偏好）就写进 `context_updates`。kind=project 时 key 必须是用户上下文里已有的项目名，value 写这个项目的**最新进展**（一两句话）；不要用带日期或带检查名称的 key 去新建项目。
 - `summary` 用中文 markdown 写给用户看：做了什么、结论是什么、下一步是什么，控制在 25 行以内。
 
 {security}
@@ -174,6 +174,7 @@ CONTEXT_REFRESH = """\
 {tasks}
 
 ## 要求
+0. 「项目」是长期稳定、有名字的事情（论文、模型/仓库、会议、求职……），key 用稳定的项目名，不要带日期；某次检查的结果、审计结论属于 note，不是 project。
 1. 输出要新增或更新的事实（op=upsert），以及已经过时的事实（op=stale）。kind 包括 role（职责/身份）、project（在推进的项目，value 写现状和下一步）、goal（长期目标）、interest（技术兴趣）、habit（日常习惯，如活跃时段）、preference（偏好）、person（经常协作的人，只写角色，不写联系方式）、deadline（value 写日期和事项）、note。
 2. key 要稳定、简短（例如项目名），这样下次可以更新同一条。每条 value 控制在 1–2 句。
 3. 只写有证据的内容，evidence 写依据；推测的内容把 confidence 调低（<0.5）。

@@ -122,8 +122,8 @@ def refresh_context() -> dict:
                                  confidence=float(f.get("confidence", 0.5)), status="stale", actor="agent:context")
                 stale += 1
             continue
-        if repo.upsert_fact(f["kind"], f["key"][:80], f["value"][:600], source=f"context-agent: {f.get('evidence', '')[:80]}",
-                            confidence=float(f.get("confidence", 0.6)), actor="agent:context"):
+        if agent_write_fact(f["kind"], f["key"], f["value"], source=f"context-agent: {f.get('evidence', '')[:80]}",
+                            confidence=float(f.get("confidence", 0.6)), actor="agent:context", may_define_projects=True):
             upserts += 1
     if data.get("focus_summary"):
         repo.kv_set("context.focus", data["focus_summary"][:2500])
@@ -140,10 +140,27 @@ def refresh_context() -> dict:
     return {"ok": True, "run_id": run_id, "upserts": upserts, "stale": stale, "opportunities": created}
 
 
+def agent_write_fact(kind: str, key: str, value: str, *, source: str, confidence: float, actor: str, may_define_projects: bool) -> str | None:
+    """Write an agent-provided fact. Projects are stable things the user owns: a task agent may only report PROGRESS on a
+    project (kept as one rolling `进展·<project>` note), it cannot create or re-summarise projects; the daily context
+    agent may maintain project summaries but a dated / kebab-case key is still just a progress note."""
+    from . import projects
+    if kind == "project":
+        existing = projects.match_project(key)
+        if existing and may_define_projects:
+            return repo.upsert_fact("project", existing["key"], value[:400], source=source, confidence=confidence, actor=actor)
+        if not existing and may_define_projects and not projects.looks_like_progress_note(key):
+            return repo.upsert_fact("project", key[:60], value[:400], source=source, confidence=confidence, actor=actor)
+        name = existing["key"] if existing else key
+        return repo.upsert_fact("note", (projects.PROGRESS_PREFIX + name)[:80], (f"（{name}）{value}" if existing else value)[:600],
+                                source=source, confidence=confidence, actor=actor)
+    return repo.upsert_fact(kind, key[:80], value[:600], source=source, confidence=confidence, actor=actor)
+
+
 def apply_updates(updates: list[dict], source: str) -> int:
     n = 0
     for u in updates or []:
         if u.get("kind") and u.get("key") and u.get("value"):
-            if repo.upsert_fact(u["kind"], u["key"][:80], u["value"][:600], source=source, confidence=0.6, actor="agent"):
+            if agent_write_fact(u["kind"], u["key"], u["value"], source=source, confidence=0.6, actor="agent", may_define_projects=False):
                 n += 1
     return n

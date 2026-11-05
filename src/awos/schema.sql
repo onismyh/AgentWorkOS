@@ -257,3 +257,12 @@ CREATE TABLE IF NOT EXISTS topic_items (
     PRIMARY KEY (entity_type, entity_id)
 );
 CREATE INDEX IF NOT EXISTS ix_topic_items_key ON topic_items(topic_key);
+
+-- Which project (a canonical context fact of kind 'project', identified by its key = project name) a topic belongs to.
+-- source 'user' links are never changed by the AI.
+CREATE TABLE IF NOT EXISTS topic_projects (
+    topic_key   TEXT PRIMARY KEY,
+    project_key TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'llm',   -- llm | rule | user
+    updated_at  TEXT NOT NULL
+);

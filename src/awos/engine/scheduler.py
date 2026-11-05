@@ -194,8 +194,14 @@ class Scheduler:
 
 
 def _topics_job() -> None:
+    from ..brain import projects
     from ..brain.topics import ensure_topics, refresh_briefs
+    last = repo.kv_get("projects.last_consolidate")
+    if not last or db.parse_ts(last) < datetime.now(timezone.utc) - timedelta(hours=24):
+        repo.kv_set("projects.last_consolidate", utcnow())
+        projects.consolidate_projects()  # demote working notes, name/summarise the canonical projects (once a day)
     ensure_topics()
+    projects.link_topics()
     refresh_briefs()
 
 

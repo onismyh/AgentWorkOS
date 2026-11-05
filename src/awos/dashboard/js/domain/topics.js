@@ -97,7 +97,7 @@ export function groupByTopic(items, serverTopics = []) {
     return {
       key: g.key, title: m.title || g.title, items: g.items, counts: countSections(g.items), rank: m.rank ?? null,
       oldest_ts: m.oldest_ts || minTs(g.items), newest_ts: m.newest_ts || maxTs(g.items),
-      state_now: m.state_now || '', has_brief: !!m.has_brief, brief_stale: !!m.brief_stale,
+      state_now: m.state_now || '', has_brief: !!m.has_brief, brief_stale: !!m.brief_stale, project: m.project || null,
     };
   });
   out.sort((a, b) => (a.rank != null && b.rank != null ? a.rank - b.rank : a.rank != null ? -1 : b.rank != null ? 1 : byUrgency(a, b)));

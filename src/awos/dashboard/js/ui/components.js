@@ -2,6 +2,7 @@
 import { h, raw, join, esc, Safe } from '../core/html.js';
 import { icon } from './icons.js';
 import { META, STATUS_VIEW, RUN_VIEW, APV_VIEW, RISK, effLevel, levelName, catLabel, execSlot } from '../domain/vocab.js';
+import { projectSlot } from '../domain/projects.js';
 
 /** data-* attributes from an object, e.g. dataAttrs({id: 'x'}) -> ' data-id="x"'. Keys must be constant identifiers. */
 export function dataAttrs(obj = {}) {
@@ -61,6 +62,22 @@ export function kwChips(list, { max = 4, act } = {}) {
   const shown = items.slice(0, max);
   const rest = items.length - shown.length;
   return h`<span class="chips">${shown.map((k) => kwChip(k, { act }))}${rest > 0 ? h`<span class="chip chip-more" data-tip="${items.slice(max).join('、')}">+${rest}</span>` : ''}</span>`;
+}
+
+/**
+ * Project chip: a folder mark in the project's colour + the project name (the name is always printed, so identity never relies on
+ * colour alone). Passive <span> by default; with `act` it is a button. `empty` renders the dashed "未关联项目" chip for no project.
+ */
+export function projectChip(p, { act, data, cls = '', empty = false, tip = true, label } = {}) {
+  if (!p?.key && !empty) return raw('');
+  const none = !p?.key;
+  const name = none ? (label || '未关联项目') : p.name || p.key;
+  const klass = `pj-chip ${none ? 'pj-none' : `pj-c${projectSlot(p.key)}`}${cls ? ` ${cls}` : ''}`;
+  const tipText = none ? '这个话题还没有关联项目' : `项目：${name}${p.summary ? `
+${p.summary}` : ''}`;
+  const inner = h`${icon(none ? 'circle-dashed' : 'folder', { size: 12 })}<span class="pj-n">${name}</span>`;
+  const attrs = h`${act ? h` data-act="${act}"` : ''}${dataAttrs(data)}${tip ? tipAttr(tipText) : ''}`;
+  return act ? h`<button type="button" class="${klass}"${attrs}>${inner}</button>` : h`<span class="${klass}"${attrs}>${inner}</span>`;
 }
 
 /* ------------------------------------------------------------------ Level / Priority / Executor */
