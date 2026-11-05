@@ -33,3 +33,9 @@
 
 - 让 Codex 做独立的架构评审非常有价值：它通过实际复现找出了 16 类问题（租约 fencing、事务嵌套、审批过期、预算预留等），已全部按 P0/P1 修复（ADR-004，见 `docs/reviews/`）。
 - 并行子 Agent 必须**按文件划分所有权**，并在共享合同（`executors/base.py`、`sensors/base.py`、`engine/actions.py`）上先达成一致。
+
+## 写补丁脚本时的坑
+- 这个环境里 shell 会把我命令里的双反斜杠吃成单个，`\n` 会变成真换行、`r"\Agent"` 变成 `\A`。含转义的改动用 Edit 工具，不要用 heredoc 里的 Python 补丁脚本。
+- Windows 的 Python 看不到 MSYS 的 `/tmp`（脚本内 `open("/tmp/..")` 会失败）；临时脚本放项目的 `var/test-cx/`。
+- 邮箱大师的 `OrigBody` 有时是 TEXT 类型的二进制，`SELECT *` 会报 UTF-8 解码错误，要设 `conn.text_factory = bytes`。
+- Base64 签名的最后一个字符只有 4 个有效位，测试里翻转它会偶发地不改变解码结果（曾导致链接篡改测试偶发失败）。

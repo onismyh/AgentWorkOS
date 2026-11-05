@@ -27,3 +27,14 @@
 - prompt 走 stdin（UTF-8，规避 Windows 命令行长度和引号问题），npm `.cmd` shim 解析成真实 exe/js 入口。
 - 超时/取消：`taskkill /T /F` + Windows Job Object（KILL_ON_JOB_CLOSE），daemon 死亡时子进程也会被带走。
 - 守护进程退出用 `os._exit`，因为 worker 线程不是 daemon 线程，不硬退出会让旧进程拖到 agent 跑完（实测遇到过）。
+
+## Shell 权限（Claude，实测）
+- 本机 Claude Code 只有 **PowerShell** 工具，没有 Bash。权限规则两套都写（`executors/claude.py` 的 `SAFE_SHELL` / `DENY_SHELL`）。
+- 有效：`PowerShell(git status:*)`、`PowerShell(git -C * status *)`（带路径的 `-C` 形式必须用空格加星号）。
+- 无效：`PowerShell(git -C * status:*)`；`cd "<repo>"; git status` 这类复合命令会被拒绝（`Set-Location` 也一样）。
+- `--allowedTools` 里单条规则含空格没问题（实测）；拒绝优先于允许。
+
+## Pi / DSH 实测（DeepSeek key 已配置）
+- Pi：`deepseek/deepseek-v4-pro`，一个小任务约 4k token / $0.007；事件含 write/read 工具调用；`auth check --provider deepseek` 返回 ready。
+- DSH：默认 provider `deepseek-official`、模型 `deepseek-flash`；usage 在每个 `step_end` 事件里（`inputTokens/outputTokens/cacheReadTokens`），需累加；没有费用字段。
+- Pi 的 `settings.json` 写错转义会被忽略并只给一行警告（我们曾把 `E:\Git` 写成 `E:\Git` 被 shell 吃掉一半反斜杠）——改用 Python `json.dump` 生成。

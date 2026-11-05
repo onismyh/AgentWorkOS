@@ -82,3 +82,23 @@
 **背景**：自测时 CLI 批准了一个动作，后台线程随 CLI 进程退出而死，审批卡在 `executing`。
 
 **决策**：`outbox.EXECUTE_INLINE`（daemon/API 内为 True）；CLI 设为 False，只记录决定，由 scheduler 每个 tick 扫描 `approved` 的动作并执行。`executing` 状态在 daemon 重启时一律标 failed 并交人工核对，不自动重发。
+
+## ADR-010 Shell 权限：只读命令随用，写操作走 Outbox（2026-11-05）
+
+**背景**：用户看到分析任务的总结里写着"还没有提交。我这次没有 git/PowerShell 权限，也不能写仓库目录"，并表示必要的 shell 命令可以按需使用。实测原因：本机的 Claude Code 只有 **PowerShell 工具**（没有 Bash 工具），而只读模式把 shell 整个禁掉了。
+
+**决策**：
+- 只读运行（L1/L2）放行一组经过实测的只读命令：`git status/diff/log/show/ls-files/rev-parse/blame…`、`Get-ChildItem/Get-Content/Select-String…`（Bash 与 PowerShell 两套规则）。规则语法实测结论：`PowerShell(git status:*)` 有效；`git -C <路径> …` 这种形式必须写成 `git -C * status *`（空格加星号）才能匹配；`cd …; git …` 这类复合命令会被拒绝，所以提示词教 agent 用 `git -C <仓库> …`。
+- 所有运行都拒绝 git 写操作与破坏性命令（push/commit/reset/clean/checkout/rebase/merge、rm -rf、Remove-Item…）。
+- 提交和推送由系统代办：新增 Outbox 动作 `git_commit`（只提交列出的路径，拒绝 `.env`/密钥/`__pycache__`、路径逃逸、空路径、`add -A`）和 `git_push`（用 `runtime/gh` 的凭据助手，每次调用单独传 `-c`，不改全局 git 配置）。批准后由系统执行一次。
+- 实际验证：用户批准的"在 thuthesis 创建两个本地 commit"已被执行（632f5b8、00e3c9b），工作区干净，没有推送。
+
+## ADR-011 邮件正文可读，但只给 Codex/Claude（2026-11-05）
+
+**背景**：用户允许读取邮件正文。邮箱大师的 `content.db` 里正文就是标准 zlib 压缩（`CompressType=1`，头部 `78 01`），不是私有格式；`OrigBody` 有时以 TEXT 类型存二进制，需 `text_factory=bytes`；`MailId` 对应 `MailMeta.LocalId`；`Topicid` 可以串起会话。
+
+**决策**：`awos/mailstore.py` 只读解码；信号的 `payload.ref`（`mail:<账户键>:<LocalId>`）把任务链接到具体邮件；worker 执行前把来源邮件和同会话邮件导出到任务工作区 `inputs/mail/`（每封 ≤1.2 万字，密钥类内容脱敏，头部含收件人/抄送以便起草回复）并记审计事件。含邮件内容的任务不会路由给 Pi/DSH（DeepSeek），验证环节也跳过它们。CLI：`awos mail search <词>`、`awos mail show <ref>`。
+
+## ADR-012 Pi / DSH 启用，使用用户的 DeepSeek key（2026-11-05）
+
+**决策**：key 从用户指定的桌面文件复制到 gitignored 的 `var/secrets.toml`（`[pi.env]`、`[dsh.env]`），不进 git、不打印。Pi 默认模型 `deepseek/deepseek-v4-pro`，DSH 默认 `deepseek-flash`。用途：独立验证（与执行器不同模型族）和非个人类别（dev/research/learning/data/pm）的只读分析优先走它们。DSH 只给 token 不给费用，按 `[executors.dsh] usd_per_mtok_*` 估算计入预算。
