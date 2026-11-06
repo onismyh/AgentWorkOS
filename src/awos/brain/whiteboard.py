@@ -14,7 +14,7 @@ SEEDED_KEY = "whiteboard.seeded"
 
 DEFAULT_RULES: list[tuple[str, str]] = [
     ("Git 交付权限",
-     "只有你自己的 agent/<主题> 分支可以直接 commit 并 push，不需要请示：系统在独立的工作区里提交，不会切换或改动用户正在用的分支和文件。"
+     "只有你自己的 agent/<主题> 分支可以直接 commit 并 push，不需要请示：系统把提交直接写到这个分支上，不检出任何东西，不会切换或改动用户正在用的分支和文件。"
      "其他分支以及 main/master 等默认分支一律先请示：不提交、不推送、不 force-push、不改写历史。"
      "涉及邮件、私人事务或外部内容（别人的 issue/PR）的任务，以及只读任务，所有 git 动作都要用户批准。"
      "要发起或合并 MR/PR 时必须先告诉用户（提议 open_mr，由用户确认），合并由用户决定。"),
@@ -29,7 +29,11 @@ DEFAULT_RULES: list[tuple[str, str]] = [
 PREVIOUS_DEFAULTS: dict[str, tuple[str, ...]] = {
     "Git 交付权限": ("默认可以 commit 并 push 到本地分支和远端分支（用新的功能分支，如 agent/<主题>），不需要请示，系统会代为执行。"
                    "不要直接动 main/master 等默认分支：不提交、不推送、不 force-push、不改写历史。"
-                   "要发起或合并 MR/PR 时必须先告诉用户（提议 open_mr，由用户确认），合并由用户决定。",),
+                   "要发起或合并 MR/PR 时必须先告诉用户（提议 open_mr，由用户确认），合并由用户决定。",
+                   "只有你自己的 agent/<主题> 分支可以直接 commit 并 push，不需要请示：系统在独立的工作区里提交，不会切换或改动用户正在用的分支和文件。"
+                   "其他分支以及 main/master 等默认分支一律先请示：不提交、不推送、不 force-push、不改写历史。"
+                   "涉及邮件、私人事务或外部内容（别人的 issue/PR）的任务，以及只读任务，所有 git 动作都要用户批准。"
+                   "要发起或合并 MR/PR 时必须先告诉用户（提议 open_mr，由用户确认），合并由用户决定。"),
 }
 
 

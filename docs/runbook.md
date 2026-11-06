@@ -110,7 +110,7 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 - `sandbox.deny_read` 可以再加禁止读取的路径。
 - Windows/Linux 上：codex、dsh 用各自的原生沙箱；claude 在 Linux 上有 bubblewrap 时才开沙箱。
 
-### 2.4 Git：agent 分支与独立工作区
+### 2.4 Git：agent 分支
 
 - 只有 `agent/<主题>` 分支上的 `git_commit` / `git_push` 不需要批准（`config/policy.toml [git]`）。提交用 git 底层命令直接写到分支上（私有 index → `commit-tree` → 带旧值校验的 `update-ref`），不检出任何东西，所以：
   - 你当前的分支、暂存区和工作区都不会被切换或改动；

@@ -170,7 +170,7 @@ def test_commits_refuse_intermediate_files(git_env):
 def test_prompts_tell_agents_the_new_rules():
     from awos.brain import prompts
     text = prompts.EXECUTE + prompts.SECURITY_RULES + prompts.VERIFY
-    for needle in ("open_mr", "agent/<主题> 分支不需要用户批准", "独立工作区", "交付前清理", "中间产物", "不能自己创建或合并 MR"):
+    for needle in ("open_mr", "agent/<主题> 分支不需要用户批准", "不检出任何东西", "交付前清理", "中间产物", "不能自己创建或合并 MR"):
         assert needle in text, needle
 
 
@@ -293,11 +293,11 @@ def test_sensitive_tasks_always_ask(git_env):
 def test_untouched_default_rule_is_updated_but_user_edits_stay(client):
     from awos import repo
     from awos.brain import whiteboard
-    old = whiteboard.PREVIOUS_DEFAULTS["Git 交付权限"][0]
     whiteboard.ensure_defaults()
-    repo.upsert_fact("rule", "Git 交付权限", old, source="user", actor="user", pinned=True)       # as seeded by an older version
-    whiteboard.ensure_defaults()
-    assert "agent/<主题> 分支可以直接" in {f["key"]: f["value"] for f in whiteboard.rules()}["Git 交付权限"]
+    for old in whiteboard.PREVIOUS_DEFAULTS["Git 交付权限"]:                                       # as seeded by older versions
+        repo.upsert_fact("rule", "Git 交付权限", old, source="user", actor="user", pinned=True)
+        whiteboard.ensure_defaults()
+        assert {f["key"]: f["value"] for f in whiteboard.rules()}["Git 交付权限"] == dict(whiteboard.DEFAULT_RULES)["Git 交付权限"]
     repo.upsert_fact("rule", "Git 交付权限", "我自己的写法", source="user", actor="user", pinned=True)
     whiteboard.ensure_defaults()
     assert {f["key"]: f["value"] for f in whiteboard.rules()}["Git 交付权限"] == "我自己的写法"

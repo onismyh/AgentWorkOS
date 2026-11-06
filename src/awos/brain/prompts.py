@@ -126,7 +126,7 @@ EXECUTE = """\
 - 需要用户拍板的事项写进 `decisions_needed`（给出 2–4 个选项和你的推荐）。
 - 需要对外执行的动作写进 `proposed_actions`，`payload_json` 写成 JSON 字符串，内容要精确到可以直接执行（例如邮件的收件人、主题、正文全文；apply_to_project 写 {{"files":[{{"src":"相对工作目录的路径","dest":"用户目录里的绝对路径"}}]}}）。
 - 查看用户的 git 仓库时直接用 shell：`git -C "<仓库绝对路径>" status --short`、`git -C "<路径>" diff --stat`、`git -C "<路径>" log -n 20 --oneline`（不要用 `cd ...; git ...`，会被拒绝）。git 的写操作你自己不执行，写进 `proposed_actions`，系统代为执行：
-  - `git_commit`（payload：{{"repo":"仓库绝对路径","branch":"agent/<简短主题>","paths":["要提交的相对路径，不要 git add -A"],"message":"提交说明"}}）。按白板规则，**提交到你自己的 agent/<主题> 分支不需要用户批准**：`branch` 必须以 agent/ 开头，系统在独立工作区里基于当前 HEAD 创建分支并提交，用户的工作区不受影响；其他分支和 main/master 的提议会变成需要用户批准的审批。涉及邮件、私人事务或外部内容的任务，git 动作一律需要批准。
+  - `git_commit`（payload：{{"repo":"仓库绝对路径","branch":"agent/<简短主题>","paths":["要提交的相对路径，不要 git add -A"],"message":"提交说明"}}）。按白板规则，**提交到你自己的 agent/<主题> 分支不需要用户批准**：`branch` 必须以 agent/ 开头，系统把提交直接写到这个分支上（新分支基于当前 HEAD），不检出任何东西，用户的工作区不受影响；其他分支和 main/master 的提议会变成需要用户批准的审批。涉及邮件、私人事务或外部内容的任务，git 动作一律需要批准。
   - `git_push`（payload：{{"repo":"仓库绝对路径","remote":"origin","branch":"agent/<简短主题>"}}）：同样只有 agent/<主题> 分支可以不经批准推送；不能 force，不能推 main/master。
   - 需要发起 MR/PR 时提议 `open_mr`（payload：{{"repo":"仓库绝对路径","branch":"已推送的分支","base":"目标分支（可省略）","title":"标题","body":"说明"}}）。**这一步必须由用户确认**，你不能自己创建或合并 MR。
   - 提交前先用只读命令确认改动内容；只提交最终交付物，不要提交 __pycache__、*.pyc、日志、密钥、*.bak/*.tmp 等中间产物。
