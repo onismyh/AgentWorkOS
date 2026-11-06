@@ -134,6 +134,7 @@ class Dataset:
         notes = context_mod._latest_progress(repo.list_facts(kind="note", status="active"))   # newest `进展·<project>` note per project
         self.progress = {self._match_name(name) or name: text for name, text in notes.items()}
         self.proj_of: dict[str, str | None] = {}
+        self.guessed: set[str] = set()   # attributed only by matching the project name in the task's text
         for tid in self.tasks:
             self._resolve(tid)
 
@@ -157,8 +158,12 @@ class Dataset:
             up = t.get("parent_id") or (t.get("root_id") if t.get("root_id") != tid else None)
             if up and up in self.tasks and depth < 6:
                 found = self._resolve(up, depth + 1)
+                if found and up in self.guessed:
+                    self.guessed.add(tid)
         if not found:
             found = self._by_text(f"{t['title']} {(t.get('description') or '')[:300]}")
+            if found:
+                self.guessed.add(tid)
         self.proj_of[tid] = found
         return found
 
@@ -174,9 +179,11 @@ class Dataset:
                 tie = True
         return None if tie else best
 
-    def project_tasks(self, key: str) -> list[dict]:
+    def project_tasks(self, key: str, *, explicit: bool = False) -> list[dict]:
+        """Tasks the board shows under `key`; explicit=True leaves out the ones only guessed from their text (the ones
+        bulk actions such as archiving must not touch)."""
         want = None if key == UNASSIGNED else key
-        return [t for tid, t in self.tasks.items() if self.proj_of.get(tid) == want]
+        return [t for tid, t in self.tasks.items() if self.proj_of.get(tid) == want and not (explicit and tid in self.guessed)]
 
     # ---- artifacts
     def media_of(self, a: dict) -> dict | None:
@@ -667,12 +674,16 @@ def _stats(ds: Dataset, tasks: list[dict], events: list[dict]) -> dict:
         d["ok"] += 1 if r["status"] == "succeeded" else 0
     live = [t for t in tasks if t["status"] not in ("cancelled", "dismissed")]
     asks = sum(1 for a in ds.approvals if a["task_id"] in ids and a["status"] == "pending") + sum(1 for t in tasks if t["status"] in ("waiting_user", "review"))
+    mine = [t for t in live if t["status"] in OPEN_STATUSES and t["id"] not in ds.guessed]   # what archiving would close
+    mine_ids = {t["id"] for t in mine}
+    close_asks = (sum(1 for a in ds.approvals if a["task_id"] in mine_ids and a["status"] == "pending")
+                  + sum(1 for t in mine if t["status"] in ("waiting_user", "review")))
     stamps = [e["ts"] for e in events if _is_activity(e)]
     return {"tasks": len(live), "tasks_done": sum(1 for t in live if t["status"] == "done"),
             "tasks_active": sum(1 for t in live if t["status"] in ("running", "ready", "blocked", "waiting_approval")),
             "tasks_failed": sum(1 for t in live if t["status"] == "failed"), "tasks_open": sum(1 for t in live if t["status"] in OPEN_STATUSES),
             "agent_runs": len(runs), "agent_ok": sum(1 for r in runs if r["status"] == "succeeded"), "executors": per_exec,
-            "interventions": sum(1 for e in events if e["human"]), "open_asks": asks,
+            "interventions": sum(1 for e in events if e["human"]), "open_asks": asks, "close_open": len(mine), "close_asks": close_asks,
             "cost_usd": round(sum(float(r["cost_usd"] or 0) for r in runs), 3), "first_ts": min((e["ts"] for e in events), default=None), "last_ts": max(stamps) if stamps else None}
 
 
@@ -724,7 +735,8 @@ def _lane(ds: Dataset, key: str, name: str, summary: str, events: list[dict]) ->
     r = _review(ds, key, name, summary, events)
     return {"key": key, "name": name, "summary": clip(summary, 120), "progress": r["progress"], "next_milestone": r["next"], "last_activity": r["stats"]["last_ts"],
             "health": r["health"], "state": r["state"], "last": r["last"], "asks": r["asks"][:3],
-            "stats": {k: r["stats"][k] for k in ("tasks", "tasks_done", "tasks_active", "tasks_open", "agent_runs", "agent_ok", "interventions", "open_asks", "cost_usd")}}
+            "stats": {k: r["stats"][k] for k in ("tasks", "tasks_done", "tasks_active", "tasks_open", "agent_runs", "agent_ok", "interventions", "open_asks",
+                                                 "close_open", "close_asks", "cost_usd")}}
 
 
 def _attention_order(lane: dict) -> tuple:

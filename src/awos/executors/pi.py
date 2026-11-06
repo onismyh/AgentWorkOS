@@ -1,8 +1,8 @@
 """Pi coding agent adapter (`@earendil-works/pi-coding-agent`, run as `node cli.js -p --mode json`).
 
-Pi has no sandbox/permission system: AgentWorkOS limits its tool allowlist per sandbox level and only
-routes workspace-bounded work to it. Structured output is requested in the prompt and parsed from the
-final assistant message.
+Pi has no sandbox/permission system of its own: AgentWorkOS limits its tool allowlist per sandbox level, and on macOS
+runs it under sandbox-exec (executors/sandbox.py): writes only to the workspace (write runs), Pi's home and a private
+TMPDIR; credential files unreadable. Structured output is requested in the prompt and parsed from the final message.
 """
 from __future__ import annotations
 
@@ -35,10 +35,16 @@ def build_argv(spec: RunSpec, model: str | None) -> list[str]:
     return argv
 
 
+def pi_home() -> Path:
+    """Pi's agent dir: an existing login the user pointed setup at ([pi] agent_dir), else runtime/pi-home."""
+    d = runtime_secrets("pi").get("agent_dir")
+    return Path(os.path.expanduser(str(d))) if d else runtime_dir("pi-home")
+
+
 def build_env(spec: RunSpec) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("AWOS_")}
-    env.update({"PI_CODING_AGENT_DIR": str(runtime_dir("pi-home")), "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
-                "NO_PROXY": "localhost,127.0.0.1"})
+    """Only what Pi needs on top of the scrubbed inherited env (proc.child_env drops credential-looking variables)."""
+    env = {"PI_CODING_AGENT_DIR": str(pi_home()), "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
+           "NO_PROXY": "localhost,127.0.0.1"}
     for k, v in (runtime_secrets("pi").get("env") or {}).items():
         env[str(k)] = str(v)
     env.update(spec.env or {})
@@ -112,7 +118,7 @@ class PiExecutor(Executor):
         if not entry().exists():
             return False, "pi not installed (runtime/pi)"
         sec = runtime_secrets("pi")
-        auth = runtime_dir("pi-home") / "auth.json"
+        auth = pi_home() / "auth.json"
         has_oauth = auth.exists() and auth.stat().st_size > 2
         if not sec.get("env") and not has_oauth:
             return False, "pi has no model credentials (var/secrets.toml [pi] env, or run /login once)"
@@ -124,7 +130,12 @@ class PiExecutor(Executor):
         model = spec.model or runtime_secrets("pi").get("model")
         parser = PiParser(on_event)
         prompt = schema_prompt(spec.prompt, spec.output_schema)
-        pr = run_process(build_argv(spec, model), cwd=spec.cwd, stdin_text=prompt, env=build_env(spec),
+        from . import sandbox
+        home = pi_home()
+        home.mkdir(parents=True, exist_ok=True)
+        writable = [home] + ([] if spec.sandbox == "read-only" else [spec.cwd])
+        argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable, exempt=(str(home / "auth.json"),))
+        pr = run_process(argv, cwd=spec.cwd, stdin_text=prompt, env={**build_env(spec), **sb_env},
                          timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir, on_stdout=parser.feed,
                          on_stderr=lambda l: None, on_pid=spec.on_pid)
         base: dict[str, Any] = dict(exit_code=pr.exit_code, final_text=parser.final_text, tokens_in=parser.tokens_in,

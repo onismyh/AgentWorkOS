@@ -68,8 +68,9 @@ ARCHIVE_REASON = "项目已归档"
 
 def archive_project(key: str, *, close_open: bool = False, actor: str = "user") -> dict:
     """The user does not want to watch this project any more: it leaves the board, the guardian and the agents' prompts (they are
-    told not to create tasks for it). `close_open` also dismisses the project's open tasks (and withdraws their approvals), using the
-    same task -> project attribution the board shows. Restorable."""
+    told not to create tasks for it). `close_open` also dismisses the open tasks that belong to the project (and withdraws their
+    approvals): linked through a topic, the task's own project field, or a parent that belongs to it, never tasks the board only
+    guessed from their text. Restorable."""
     from ..api.timeline import Dataset
     from ..brain.projects import canonical_projects
     fact = next((f for f in canonical_projects() if f["key"] == key), None)
@@ -77,7 +78,7 @@ def archive_project(key: str, *, close_open: bool = False, actor: str = "user") 
         raise KeyError(f"project {key}")
     closed = 0
     if close_open:
-        for t in Dataset().project_tasks(key):
+        for t in Dataset().project_tasks(key, explicit=True):
             if TaskStatus(t["status"]) not in TERMINAL:
                 dismiss_task(t["id"], actor=actor, reason=ARCHIVE_REASON)
                 closed += 1

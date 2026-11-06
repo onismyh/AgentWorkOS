@@ -71,3 +71,21 @@ def test_archive_endpoints(client):
     assert client.get("/api/context?status=all").json()["groups"]["project"][0]["status"] == "archived"
     assert client.post(f"/api/projects/{key}/restore", headers=H).json() == {"ok": True, "key": key}
     assert client.post(f"/api/projects/{key}/restore", headers=H).status_code == 404                   # already active
+
+
+def test_archive_closes_only_tasks_that_belong_to_the_project(client):
+    from awos import repo
+    from awos.api.timeline import Dataset
+    from awos.engine import actions
+    key = _project("电厂改造模型")
+    mine = _task(key, "ready", "校准参数")
+    child = repo.create_task("子任务", parent_id=mine, status="ready", source="manual")          # belongs through its parent
+    guessed = repo.create_task("顺便看看电厂改造模型的那封邮件", status="ready", source="manual")  # only mentions the name
+    ds = Dataset()
+    assert {mine, child, guessed} <= {t["id"] for t in ds.project_tasks(key)}                    # the board still shows all three
+    assert {t["id"] for t in ds.project_tasks(key, explicit=True)} == {mine, child}
+    lane = next(p for p in client.get("/api/timeline").json()["projects"] if p["key"] == key)
+    assert lane["stats"]["close_open"] == 2 and lane["stats"]["tasks_open"] == 3                 # the dialog counts what it closes
+    assert actions.archive_project(key, close_open=True)["closed"] == 2
+    assert repo.get_task(guessed)["status"] == "ready"
+    assert repo.get_task(mine)["status"] == repo.get_task(child)["status"] == "dismissed"

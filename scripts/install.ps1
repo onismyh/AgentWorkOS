@@ -12,7 +12,9 @@
        is absent; SHA256 is verified against SHASUMS256.txt. The system Node is never touched.
        Downloads use the Windows system (IE) proxy, or -Proxy.
     6. optional: -AddToPath puts <root>\scripts on the user PATH (so `awos ...` works in new terminals)
-    7. optional: -RegisterService runs scripts\service-install.ps1 (Task Scheduler)
+    7. awos setup: codex / pi / dsh into runtime\ (pinned npm versions, no lifecycle scripts) and credentials
+       already on this machine (Codex login, DEEPSEEK_API_KEY, DeepSeek Harness login) into var\secrets.toml
+    8. optional: -RegisterService runs scripts\service-install.ps1 (Task Scheduler)
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1
@@ -180,6 +182,12 @@ try {
         if ($null -ne $sysNode -and $sysNode.Source -ne $NodeExe) {
             Write-Ok ("system Node untouched: {0} at {1}" -f (Get-ExeOutput $sysNode.Source @('--version')), $sysNode.Source)
         }
+    }
+
+    if (-not $SkipNode) {
+        Write-Step 'agent runtimes + credentials (awos setup: codex / pi / dsh into runtime\, keys found on this machine)'
+        Push-Location -LiteralPath $Root
+        try { Invoke-Native $VenvPy @('-X', 'utf8', '-m', 'awos.cli', 'setup') } finally { Pop-Location }
     }
 
     if ($AddToPath) { Write-Step 'user PATH'; Add-ScriptsToUserPath }

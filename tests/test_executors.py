@@ -40,10 +40,16 @@ def test_codex_argv_blocks_connectors_by_default(tmp_path):
     argv = CodexExecutor().build_argv(spec(tmp_path), None)
     assert argv[-1] == "-" and "--ephemeral" in argv and "apps" in argv and "plugins" in argv
     assert "danger-full-access" not in argv and "--add-dir" not in argv
-    assert argv[argv.index("-s") + 1] == "read-only"
     on = CodexExecutor().build_argv(spec(tmp_path, allow_connectors=True, sandbox="workspace-write"), None)
-    assert "apps" not in on and on[on.index("-s") + 1] == "workspace-write"
-    assert "browser_use" in on  # desktop automation is never available
+    assert "apps" not in on and "browser_use" in on  # desktop automation is never available
+    from awos.executors import sandbox
+    if sandbox.enabled():  # macOS: a permission profile instead of the coarse -s modes
+        prof = next(a for a in argv if a.startswith("permissions.awos.filesystem="))
+        assert '":root" = "read"' in prof and ":workspace_roots" not in prof and "-s" not in argv
+        assert '.ssh" = "none"' in prof and 'default_permissions="awos"' in argv
+        assert '":workspace_roots" = "write"' in next(a for a in on if a.startswith("permissions.awos.filesystem="))
+    else:
+        assert argv[argv.index("-s") + 1] == "read-only" and on[on.index("-s") + 1] == "workspace-write"
 
 
 def test_claude_argv_scopes_tools(tmp_path):

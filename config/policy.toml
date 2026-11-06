@@ -33,6 +33,11 @@ expiry_hours = { low = 72, medium = 72, high = 48 }
 # Outbox). Protected branches, MR/PR creation (open_mr) and anything else still wait for the human. Set false to ask for every one.
 auto_branch_actions = true
 protected_branches = ["main", "master"]   # the remote's own default branch (<remote>/HEAD) is protected as well
+auto_branch_prefix = "agent/"            # only branches named agent/<topic> run without asking; commits go through a separate worktree
+auto_min_level = 3                       # read-only work (L1/L2) never commits on its own
+# Sensitive tasks always ask: built from these sources (mail, notes, other people's issues/PRs) or in a private category
+# (routing.private_categories), or routed to trusted executors only because they carry mail/private content.
+no_auto_sources = ["mailmaster", "gmail", "notion", "github"]
 
 [verify]
 # Levels whose results get an independent verification pass by a second executor before delivery.

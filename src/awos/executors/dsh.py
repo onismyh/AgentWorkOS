@@ -1,7 +1,13 @@
 """DSH (DeepSeek Harness) adapter: `node lib/bin.js --profile headless --json ... -` (NDJSON, `final` event).
 
-DSH has a Windows ACL sandbox (`--permission-mode workspace-write|read-only`). Session-log upload to DeepSeek
-and telemetry are disabled. `--add-dir` breaks tool calls on Windows, so extra readable dirs are not passed.
+DSH confines its own commands (`--permission-mode workspace-write|read-only`: bwrap/Landlock on Linux, ACL restricted
+token on Windows; it fails closed when no sandbox is available). Its macOS Seatbelt profile only limits writes (and allows
+the temp areas), so on macOS the whole DSH process runs under AgentWorkOS's stricter profile instead (executors/sandbox.py:
+workspace-only writes, credential files unreadable, private TMPDIR) and DSH's `runnerCommand` hook is pointed at a
+pass-through runner (macOS refuses nested Seatbelt sandboxes; the outer one already confines every descendant).
+Session-log upload to DeepSeek and telemetry are disabled. `--add-dir` breaks tool calls on Windows, so extra readable
+dirs are not passed. Credentials: a DeepSeek API key (var/secrets.toml [dsh] env) or the DeepSeek Harness account login
+([dsh] credentials = path of its .credentials.yaml), linked into the isolated DSH_HOME.
 """
 from __future__ import annotations
 
@@ -15,6 +21,9 @@ from .base import EventSink, Executor, RunResult, RunSpec
 from .noderuntime import extract_json, node_exe, runtime_dir, runtime_secrets, schema_prompt
 
 DSH_ENTRY = Path("node_modules/@deepseek-ai/dsh/lib/bin.js")
+# bwrap-style profile args come first, then `--`, then the command: drop the former, exec the latter.
+PASSTHROUGH_RUNNER = ["/bin/sh", "-c", 'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; '
+                      '[ "$#" -gt 0 ] || { echo "awos-runner: no command" >&2; exit 125; }; shift; exec "$@"', "awos-runner"]
 
 
 def entry() -> Path:
@@ -29,6 +38,16 @@ def patch_file(spec: RunSpec, model: str | None) -> Path:
     provider = sec.get("provider")
     if model and provider:
         base += f"\n- id: agent-default-model\n  config:\n    provider: {provider}\n    model: {model}\n"
+    if account_credentials() is not None:
+        # The headless profile ships without the account platform and the local credential store: mount both so the
+        # deepseek-account provider can read the login linked into DSH_HOME (no browser sign-in is ever started here).
+        base += ("\n- id: credentials\n  disabled: false\n- id: authorization\n  disabled: false\n"
+                 "- id: deepseek-account\n  disabled: false\n")
+    from . import sandbox
+    if sandbox.enabled():
+        base += ("\n- id: sandbox\n  config:\n"
+                 f"    runnerCommand: {json.dumps(PASSTHROUGH_RUNNER)}\n"
+                 '    runnerFailureSignatures: ["awos-runner:"]\n')
     p = spec.log_dir / "dsh.patch.yml"
     p.write_text(base, encoding="utf-8")
     return p
@@ -40,10 +59,37 @@ def build_argv(spec: RunSpec, model: str | None) -> list[str]:
             "--json", "--permission-mode", mode, "--approval-policy", "never", "-"]
 
 
+def account_credentials() -> Path | None:
+    p = runtime_secrets("dsh").get("credentials")
+    if not p or not runtime_secrets("dsh").get("provider"):
+        return None
+    p = Path(os.path.expanduser(str(p)))
+    return p if p.is_file() else None
+
+
+def prepare_home() -> Path:
+    """runtime/dsh-home, with the account login linked in (by reference: a re-login in the app is picked up)."""
+    home = runtime_dir("dsh-home")
+    home.mkdir(parents=True, exist_ok=True)
+    src = account_credentials()
+    if src is not None:
+        dst = home / ".credentials.yaml"
+        if not (dst.is_symlink() and os.path.realpath(dst) == os.path.realpath(src)):
+            if dst.is_symlink() or dst.exists():
+                dst.unlink()
+            try:
+                dst.symlink_to(src)
+            except OSError:  # Windows without symlink rights
+                import shutil
+                shutil.copy2(src, dst)
+                os.chmod(dst, 0o600)
+    return home
+
+
 def build_env(spec: RunSpec) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("AWOS_")}
-    env.update({"DSH_HOME": str(runtime_dir("dsh-home")), "DSH_TELEMETRY_DISABLED": "1", "DSH_TELEMETRY_MODE": "DISABLED",
-                "NO_PROXY": "localhost,127.0.0.1"})
+    """Only what DSH needs on top of the scrubbed inherited env (proc.child_env drops credential-looking variables)."""
+    env = {"DSH_HOME": str(runtime_dir("dsh-home")), "DSH_TELEMETRY_DISABLED": "1", "DSH_TELEMETRY_MODE": "DISABLED",
+           "NO_PROXY": "localhost,127.0.0.1"}
     for k, v in (runtime_secrets("dsh").get("env") or {}).items():
         env[str(k)] = str(v)
     env.update(spec.env or {})
@@ -111,17 +157,25 @@ class DshExecutor(Executor):
             return False, "portable node missing (runtime/node)"
         if not entry().exists():
             return False, "dsh not installed (runtime/dsh)"
-        if not (runtime_secrets("dsh").get("env")):
-            return False, "dsh has no model credentials (var/secrets.toml [dsh] env, e.g. DEEPSEEK_API_KEY)"
-        return True, "dsh"
+        if runtime_secrets("dsh").get("env"):
+            return True, "dsh (API key)"
+        if account_credentials() is not None:
+            return True, "dsh (DeepSeek account login)"
+        return False, "dsh has no model credentials (run `awos setup`: DEEPSEEK_API_KEY or the DeepSeek Harness account login)"
 
     def run(self, spec: RunSpec, on_event: EventSink, cancel: threading.Event) -> RunResult:
         from .proc import classify_error, run_process
 
         model = spec.model or runtime_secrets("dsh").get("model")
+        from . import sandbox
         parser = DshParser(on_event)
-        pr = run_process(build_argv(spec, model), cwd=spec.cwd, stdin_text=schema_prompt(spec.prompt, spec.output_schema),
-                         env=build_env(spec), timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir,
+        home = prepare_home()
+        cred = account_credentials()
+        writable = [home] + ([] if spec.sandbox == "read-only" else [spec.cwd])
+        argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
+                                    exempt=(str(cred),) if cred else ())
+        pr = run_process(argv, cwd=spec.cwd, stdin_text=schema_prompt(spec.prompt, spec.output_schema),
+                         env={**build_env(spec), **sb_env}, timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir,
                          on_stdout=parser.feed, on_stderr=lambda l: None, on_pid=spec.on_pid)
         from ..config import load_config
         price = load_config().section("executors.dsh")  # USD per million tokens; DSH reports tokens but no cost

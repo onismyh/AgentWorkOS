@@ -87,7 +87,7 @@ def create_from_result(task: dict, run_id: str, out: dict) -> list[str]:
                 execute_action(repo.get_approval(aid))
                 continue
         if atype in ("git_commit", "git_push"):
-            ok, why = gitops.auto_allowed(atype, payload)
+            ok, why = gitops.auto_allowed(atype, payload, task=task)
             if ok and ids:  # an earlier decision/action of this result still waits for the human: keep the order
                 ok, why = False, "前面还有等你决定或批准的事项，这一步排在它们之后"
             if ok:  # whiteboard rule: commits/pushes of a non-protected branch need no sign-off (still recorded in the Outbox)
@@ -255,7 +255,8 @@ def execute_action(approval: dict) -> dict:
             result = _apply_to_project(approval, payload)
         elif atype in ("git_commit", "git_push", "open_mr"):
             if atype != "open_mr" and approval.get("decided_via") == "auto":
-                ok, why = gitops.auto_allowed(atype, payload)   # the repo may have changed since the rule let it through
+                task = repo.get_task(approval["task_id"]) if approval.get("task_id") else None
+                ok, why = gitops.auto_allowed(atype, payload, task=task)   # the repo may have changed since the rule let it through
                 if not ok:
                     raise RuntimeError(f"no longer allowed without approval: {why}")
             result = {"git_commit": gitops.commit, "git_push": gitops.push, "open_mr": gitops.open_mr}[atype](payload)

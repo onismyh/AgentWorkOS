@@ -120,6 +120,18 @@ daily_usd = 15.0                       # pay-per-use executors (claude, pi, dsh 
 per_task_usd = 5.0                     # was 3
 codex_daily_runs = 90                  # subscription executor: cap number of runs/day (was 60)
 
+[runtimes]
+# Agent CLIs installed by `awos setup` into runtime/<name> (pinned; npm, no lifecycle scripts). A CLI already on PATH wins.
+codex = "@openai/codex@0.167.0"
+pi = "@earendil-works/pi-coding-agent@1.5.0"
+dsh = "@deepseek-ai/dsh@0.2.2-rc.1"
+
+[sandbox]
+# Least privilege for every agent process (executors/sandbox.py). macOS: Claude Code's and Codex's / DSH's own Seatbelt
+# sandboxes are switched on; Pi (no sandbox of its own) runs under sandbox-exec. Credential files are unreadable.
+enabled = true
+deny_read = []                         # extra absolute paths agents must never read
+
 [sensors.git]
 enabled = true
 interval_minutes = 180

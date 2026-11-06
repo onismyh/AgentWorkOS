@@ -37,10 +37,22 @@ class ProcResult:
 # --------------------------------------------------------------------------- environment / command resolution
 
 
-def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Inherited env minus our own AWOS_* settings, forced UTF-8 / no colour, then caller overrides."""
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("AWOS_")}
+# Env vars that look like credentials (tokens, keys, ssh-agent / gh auth ...) are not inherited by agents: each executor
+# keeps only the prefixes it needs for its own login (see `keep_secrets`); everything else it needs is passed explicitly.
+_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION", re.I)
+
+
+def child_env(extra: dict[str, str] | None = None, *, keep_secrets: tuple[str, ...] = ()) -> dict[str, str]:
+    """Inherited env minus our own AWOS_* settings and minus credential-looking variables (except the `keep_secrets`
+    prefixes), forced UTF-8 / no colour, then caller overrides."""
+    keep = tuple(p.upper() for p in keep_secrets)
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith("AWOS_") and (not _SECRETISH.search(k) or k.upper().startswith(keep))}
     env.update(PYTHONUTF8="1", NO_COLOR="1")
+    from ..config import load_config
+    from ..osutil import system_proxy
+    if load_config().get("network.use_system_proxy", True):
+        env.update(system_proxy())
     env.update({str(k): str(v) for k, v in (extra or {}).items()})
     return env
 
@@ -54,13 +66,35 @@ def resolve_command(cmd: str | list[str]) -> list[str] | None:
     parts = [cmd] if isinstance(cmd, str) else list(cmd)
     path = shutil.which(parts[0])
     if not path:
-        return None
+        return _runtime_command(parts)
     p = Path(path)
     if p.suffix.lower() in (".cmd", ".bat"):
         target = _npm_shim_target(p)
         if target:
             return target + parts[1:]
     return [str(p)] + parts[1:]
+
+
+def _runtime_command(parts: list[str]) -> list[str] | None:
+    """A CLI installed by `awos setup` under runtime/<name> (not on PATH): run its JS entry with the runtime Node."""
+    name = parts[0]
+    if os.sep in name or "/" in name:
+        return None
+    from ..config import load_config
+    bin_dir = load_config().root / "runtime" / name / "node_modules" / ".bin"
+    for cand in ([bin_dir / f"{name}.cmd"] if IS_WINDOWS else []) + [bin_dir / name]:
+        if not cand.exists():
+            continue
+        if cand.suffix.lower() == ".cmd":
+            target = _npm_shim_target(cand)
+            return target + parts[1:] if target else None
+        real = Path(os.path.realpath(cand))
+        if real.suffix.lower() in (".js", ".cjs", ".mjs"):
+            from .noderuntime import node_exe
+            node = node_exe()
+            return [str(node), str(real)] + parts[1:] if node else None
+        return [str(real)] + parts[1:]
+    return None
 
 
 def _npm_shim_target(shim: Path) -> list[str] | None:
@@ -202,7 +236,7 @@ def run_process(argv: list[str], *, cwd: Path, stdin_text: str | None, timeout_s
                 cancel: threading.Event | None = None, log_dir: Path | None = None, env: dict[str, str] | None = None,
                 on_stdout: LineSink | None = None, on_stderr: LineSink | None = None,
                 on_pid: Callable[[int], None] | None = None, stdout_name: str = "stdout.jsonl",
-                stderr_name: str = "stderr.log") -> ProcResult:
+                stderr_name: str = "stderr.log", keep_secrets: tuple[str, ...] = ()) -> ProcResult:
     """Run argv to completion. stdin_text is written as UTF-8 then stdin is closed; stdout/stderr are streamed
     line by line to the callbacks and tee'd raw to log_dir. Timeout or cancel kills the whole process tree."""
     cancel = cancel or threading.Event()
@@ -210,7 +244,7 @@ def run_process(argv: list[str], *, cwd: Path, stdin_text: str | None, timeout_s
         log_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     try:
-        proc = subprocess.Popen(argv, cwd=str(cwd), env=child_env(env), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, cwd=str(cwd), env=child_env(env, keep_secrets=keep_secrets), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, creationflags=_FLAGS, start_new_session=not IS_WINDOWS)
     except OSError as e:
         return ProcResult(exit_code=None, spawn_error=f"spawn failed: {e}", stderr_tail=str(e))

@@ -12,9 +12,11 @@ Verified on claude 2.1.311 (see docs/playbook/executors.md):
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 from ..config import load_config
+from . import sandbox
 from .base import EventSink, Executor, RunResult, RunSpec
 from .proc import classify_error, extract_json, resolve_command, run_process, trim, version_check
 
@@ -49,6 +51,19 @@ def _rules(prefixes: list[str], exact: tuple[str, ...] = ()) -> list[str]:
 
 SAFE_SHELL = _rules(_SAFE_PREFIXES, exact=("pwd", "git remote -v")) + ["Bash(git remote -v)", "PowerShell(git remote -v)"]
 DENY_SHELL = _rules(_DENY_PREFIXES)
+# Credential-like env Claude Code itself may need (API / gateway / Bedrock / Vertex login); all others are scrubbed.
+KEEP_ENV = ("ANTHROPIC_", "CLAUDE_CODE_", "AWS_", "GOOGLE_", "VERTEX_", "CLOUD_ML_")
+
+
+def secret_rules() -> list[str]:
+    """Read/Edit deny rules for credential files (also merged into the sandbox's denyRead for shell commands)."""
+    if os.name != "posix":  # Windows: no OS sandbox for Claude Code there; path-rule syntax for drive letters unverified
+        return []
+    out = []
+    for p in sandbox.secret_paths(("~/.claude/.credentials.json",)):
+        pat = "//" + p.lstrip("/") + ("" if os.path.isfile(p) else "/**")
+        out += [f"Read({pat})", f"Edit({pat})"]
+    return out
 
 
 class ClaudeParser:
@@ -113,10 +128,13 @@ class ClaudeExecutor(Executor):
     def build_argv(self, spec: RunSpec) -> list[str]:
         argv = (self._argv() or ["claude"]) + ["-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
                                                "--permission-mode", "dontAsk"]
+        settings: dict = sandbox.claude_settings(cwd=spec.cwd, read_only_dirs=list(spec.add_dirs))
         if spec.purpose in BARE_PURPOSES:
             argv.append("--bare")
         else:
-            argv += ["--settings", json.dumps({"disableAllHooks": True})]
+            settings["disableAllHooks"] = True
+        if settings:
+            argv += ["--settings", json.dumps(settings, ensure_ascii=False)]
         if spec.model:
             argv += ["--model", spec.model]
         if spec.max_budget_usd:
@@ -131,7 +149,7 @@ class ClaudeExecutor(Executor):
         if spec.allow_network:
             allowed += WEB_TOOLS
         argv += ["--allowedTools", " ".join(allowed)]
-        disallowed = ([] if spec.allow_network else list(WEB_TOOLS)) + list(DENY_SHELL)
+        disallowed = ([] if spec.allow_network else list(WEB_TOOLS)) + list(DENY_SHELL) + secret_rules()
         if disallowed:
             argv += ["--disallowedTools", " ".join(disallowed)]
         for d in spec.add_dirs:
@@ -144,7 +162,7 @@ class ClaudeExecutor(Executor):
     def run(self, spec: RunSpec, on_event: EventSink, cancel: threading.Event) -> RunResult:
         parser = ClaudeParser(on_event)
         pr = run_process(self.build_argv(spec), cwd=spec.cwd, stdin_text=spec.prompt, timeout_s=spec.timeout_s, cancel=cancel,
-                         log_dir=spec.log_dir, env=spec.env, on_stdout=parser.feed, on_pid=spec.on_pid)
+                         log_dir=spec.log_dir, env=spec.env, on_stdout=parser.feed, on_pid=spec.on_pid, keep_secrets=KEEP_ENV)
         res = parser.result or {}
         usage = res.get("usage") or {}
         final = res.get("result") if isinstance(res.get("result"), str) else "\n".join(parser.texts)

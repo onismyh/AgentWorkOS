@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
@@ -59,3 +60,36 @@ def kill_process_tree(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
     except OSError:
         pass
+
+
+_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+_proxy_cache: tuple[float, dict[str, str]] | None = None
+
+
+def parse_scutil_proxy(text: str) -> dict[str, str]:
+    kv = dict(re.findall(r"^\s*(\w+)\s*:\s*(\S+)\s*$", text, re.M))
+    url = None
+    for kind in ("HTTPS", "HTTP"):
+        if kv.get(f"{kind}Enable") == "1" and kv.get(f"{kind}Proxy"):
+            url = f"http://{kv[f'{kind}Proxy']}:{kv.get(f'{kind}Port', '80')}"
+            break
+    if not url:
+        return {}
+    no = "localhost,127.0.0.1,::1"
+    return {"HTTPS_PROXY": url, "HTTP_PROXY": url, "https_proxy": url, "http_proxy": url, "NO_PROXY": no, "no_proxy": no}
+
+
+def system_proxy() -> dict[str, str]:
+    """macOS: the System Settings HTTP(S) proxy as env vars, for CLIs that only honour HTTPS_PROXY (GUI apps use it
+    automatically). Empty when the environment already sets a proxy, off macOS, or when none is configured."""
+    global _proxy_cache
+    if not IS_MAC or any(os.environ.get(v) for v in _PROXY_VARS):
+        return {}
+    if _proxy_cache and time.monotonic() - _proxy_cache[0] < 60:
+        return _proxy_cache[1]
+    try:
+        out = subprocess.run(["/usr/sbin/scutil", "--proxy"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    _proxy_cache = (time.monotonic(), parse_scutil_proxy(out))
+    return _proxy_cache[1]

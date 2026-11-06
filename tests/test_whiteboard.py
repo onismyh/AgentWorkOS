@@ -93,8 +93,10 @@ def test_branch_commit_and_push_run_without_asking_and_leave_the_default_branch_
     from awos import repo as db
     a = db.get_approval(ids[0])
     assert a["status"] == "executed" and a["decided_via"] == "auto", a
-    assert _sh(r, "rev-parse", "--abbrev-ref", "HEAD") == "agent/fix-a"
+    assert _sh(r, "rev-parse", "--abbrev-ref", "HEAD") == main                            # the user's checkout never moves
+    assert _sh(r, "status", "--porcelain") == "M a.txt" and _sh(r, "diff", "--cached", "--name-only") == ""
     assert _sh(r, "log", "--format=%s", "agent/fix-a").splitlines()[0] == "fix a"
+    assert _sh(r, "show", "agent/fix-a:a.txt") == "2" and _sh(r, "worktree", "list").count("\n") == 0   # worktree gone
     assert _sh(r, "log", "--format=%s", main).splitlines() == ["init"]                        # main untouched
     ids = _proposed("git_push", {"repo": str(r), "remote": "origin", "branch": "agent/fix-a"})
     assert db.get_approval(ids[0])["status"] == "executed", db.get_approval(ids[0])["result"]
@@ -168,7 +170,7 @@ def test_commits_refuse_intermediate_files(git_env):
 def test_prompts_tell_agents_the_new_rules():
     from awos.brain import prompts
     text = prompts.EXECUTE + prompts.SECURITY_RULES + prompts.VERIFY
-    for needle in ("open_mr", "提交到分支不需要用户批准", "交付前清理", "中间产物", "不能自己创建或合并 MR"):
+    for needle in ("open_mr", "agent/<主题> 分支不需要用户批准", "独立工作区", "交付前清理", "中间产物", "不能自己创建或合并 MR"):
         assert needle in text, needle
 
 
@@ -241,3 +243,61 @@ def test_policy_keeps_approval_expiry_under_actions():
     from awos.brain import policy
     assert policy.approval_expiry_hours("high") == 48 and policy.approval_expiry_hours("low") == 72
     assert policy.git_policy()["protected_branches"] == ["main", "master"]
+
+
+def test_only_agent_branches_run_without_asking(git_env):
+    from awos import repo as db
+    r, _, main = _repo_with_remote(git_env)
+    _sh(r, "branch", "feature/mine")
+    (r / "a.txt").write_text("7", encoding="utf-8")
+    for branch in ("feature/mine", "agentx", "agent/", "fix-a"):
+        (aid,) = _proposed("git_commit", {"repo": str(r), "branch": branch, "paths": ["a.txt"], "message": "m"})
+        assert db.get_approval(aid)["status"] == "pending", branch
+    assert _sh(r, "log", "--format=%s", "feature/mine").splitlines() == ["init"]
+
+
+def _task_with(**fields):
+    from awos import repo
+    from awos.engine.actions import add_manual_task
+    tid = add_manual_task("t", "d", level=fields.pop("level", 3), category=fields.pop("category", "other"))
+    if fields.get("meta"):
+        repo.merge_task_meta(tid, **fields.pop("meta"))
+    if fields:
+        repo.update_task(tid, **fields)
+    return repo.get_task(tid)
+
+
+def test_sensitive_tasks_always_ask(git_env):
+    from awos import db as rawdb
+    from awos import repo as db
+    from awos.hitl import gitops, outbox
+    r, _, _ = _repo_with_remote(git_env)
+    (r / "a.txt").write_text("8", encoding="utf-8")
+    rawdb.insert("signals", {"id": "sig_mail", "source": "mailmaster", "fingerprint": "f1", "title": "邮件", "payload": "{}",
+                             "observed_at": rawdb.utcnow()})
+    cases = {"L2": _task_with(level=2), "private": _task_with(category="career"),
+             "mail-routed": _task_with(meta={"routing": {"trusted_only": True}}),
+             "from mail": _task_with(meta={"signals": ["sig_mail"]}), "github": _task_with(source="sensor:github")}
+    payload = {"repo": str(r), "branch": "agent/s", "paths": ["a.txt"], "message": "m"}
+    for name, task in cases.items():
+        ok, why = gitops.auto_allowed("git_commit", payload, task=task)
+        assert not ok and why, name
+        outbox.create_from_result(task, "run_s", {"proposed_actions": [{"type": "git_commit", "title": name, "description": "d",
+                                                                         "risk": "low", "payload_json": json.dumps(payload)}]})
+        (a,) = db.list_approvals(task_id=task["id"], limit=5)
+        assert a["status"] == "pending" and "需要你批准" in a["context_md"], name
+    assert gitops.auto_allowed("git_commit", payload, task=_task_with())[0]                      # an ordinary L3 task may
+    assert _sh(r, "branch", "--list", "agent/*") == ""
+
+
+def test_untouched_default_rule_is_updated_but_user_edits_stay(client):
+    from awos import repo
+    from awos.brain import whiteboard
+    old = whiteboard.PREVIOUS_DEFAULTS["Git 交付权限"][0]
+    whiteboard.ensure_defaults()
+    repo.upsert_fact("rule", "Git 交付权限", old, source="user", actor="user", pinned=True)       # as seeded by an older version
+    whiteboard.ensure_defaults()
+    assert "agent/<主题> 分支可以直接" in {f["key"]: f["value"] for f in whiteboard.rules()}["Git 交付权限"]
+    repo.upsert_fact("rule", "Git 交付权限", "我自己的写法", source="user", actor="user", pinned=True)
+    whiteboard.ensure_defaults()
+    assert {f["key"]: f["value"] for f in whiteboard.rules()}["Git 交付权限"] == "我自己的写法"

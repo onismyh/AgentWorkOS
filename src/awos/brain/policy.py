@@ -78,7 +78,10 @@ def git_policy() -> dict[str, Any]:
     """Whiteboard git rule: commits/pushes of non-protected branches run without asking; the rest needs the human."""
     g = load_policy().get("git", {}) or {}
     return {"auto_branch_actions": bool(g.get("auto_branch_actions", True)),
-            "protected_branches": [str(b) for b in g.get("protected_branches", ["main", "master"])]}
+            "protected_branches": [str(b) for b in g.get("protected_branches", ["main", "master"])],
+            "auto_branch_prefix": str(g.get("auto_branch_prefix", "agent/")),
+            "auto_min_level": int(g.get("auto_min_level", 3)),
+            "no_auto_sources": [str(s) for s in g.get("no_auto_sources", ["mailmaster", "gmail", "notion", "github"])]}
 
 
 def needs_approval(action_type: str) -> bool:

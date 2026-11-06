@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 from typing import Any
 
@@ -127,6 +128,9 @@ class CodexParser:
             self.on_event("error", "item", {"message": trim(it.get("message"), 1000)})
 
 
+KEEP_ENV = ("OPENAI_", "CODEX_", "AZURE_OPENAI_")  # credential-like env Codex itself may need; all others are scrubbed
+
+
 class CodexExecutor(Executor):
     name = "codex"
 
@@ -138,8 +142,7 @@ class CodexExecutor(Executor):
 
     def build_argv(self, spec: RunSpec, schema_path: str | None) -> list[str]:
         base = self._argv() or ["codex"]
-        sandbox = "read-only" if spec.sandbox == "read-only" else "workspace-write"
-        argv = base + ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "-s", sandbox, "-C", str(spec.cwd),
+        argv = base + ["exec", "--json", "--skip-git-repo-check", "--ephemeral", *self.sandbox_args(spec), "-C", str(spec.cwd),
                        "-o", str(spec.log_dir / "last_message.txt")]
         if schema_path:
             argv += ["--output-schema", schema_path]
@@ -154,7 +157,24 @@ class CodexExecutor(Executor):
             argv += ["-c", 'web_search="disabled"']
         return argv + ["-"]
 
+    @staticmethod
+    def sandbox_args(spec: RunSpec) -> list[str]:
+        """macOS: a Codex permission profile (Seatbelt) for the agent's commands: read the disk except credential files,
+        write only the workspace (write runs) and a private per-run TMPDIR, no network. Elsewhere: Codex's -s modes."""
+        from . import sandbox
+        if not sandbox.enabled():
+            return ["-s", "read-only" if spec.sandbox == "read-only" else "workspace-write"]
+        fs = {":root": "read"}
+        if spec.sandbox != "read-only":
+            fs[":workspace_roots"] = "write"
+        fs[str(spec.log_dir / "tmp")] = "write"
+        for p in sandbox.secret_paths():
+            fs[p] = "none"
+        body = ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in fs.items())
+        return ["-c", f"permissions.awos.filesystem={{{body}}}", "-c", 'default_permissions="awos"']
+
     def run(self, spec: RunSpec, on_event: EventSink, cancel: threading.Event) -> RunResult:
+        (spec.log_dir / "tmp").mkdir(parents=True, exist_ok=True)
         schema_path = None
         if spec.output_schema:
             p = spec.log_dir / "schema.json"
@@ -163,7 +183,8 @@ class CodexExecutor(Executor):
         prompt = spec.prompt if not spec.system_prompt else f"{spec.system_prompt}\n\n{spec.prompt}"
         parser = CodexParser(on_event)
         pr = run_process(self.build_argv(spec, schema_path), cwd=spec.cwd, stdin_text=prompt, timeout_s=spec.timeout_s,
-                         cancel=cancel, log_dir=spec.log_dir, env=spec.env, on_stdout=parser.feed, on_pid=spec.on_pid)
+                         cancel=cancel, log_dir=spec.log_dir, env={**(spec.env or {}), "TMPDIR": str(spec.log_dir / "tmp") + os.sep},
+                         on_stdout=parser.feed, on_pid=spec.on_pid, keep_secrets=KEEP_ENV)
         last_file = spec.log_dir / "last_message.txt"
         final = last_file.read_text(encoding="utf-8", errors="replace") if last_file.exists() else parser.last_message
         base = dict(exit_code=pr.exit_code, final_text=final or "", tokens_in=parser.tokens_in, tokens_out=parser.tokens_out,

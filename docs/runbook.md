@@ -56,10 +56,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\service-uninstall.ps
 
 ### 2.1 macOS
 
-前置：git、[uv](https://docs.astral.sh/uv/)（`curl -LsSf https://astral.sh/uv/install.sh | sh` 或 `brew install uv`）。pi / dsh 需要 Node ≥ 22.19：优先用 `runtime/node/bin/node`，没有就用 PATH 上的 `node`（如 Homebrew）。
+前置只有 git 和 curl。`install.sh` 一键装好其余全部，可重复执行：
+
+1. 没有 uv 就装到 `~/.local/bin`；建 `.venv`（Python 3.13）并装依赖；建 `var/` 子目录。
+2. Node ≥ 22.19：优先 `runtime/node`，其次 PATH 上的 `node`；都没有就从 nodejs.org 下载便携 Node LTS 到 `runtime/node`（按 SHASUMS256 校验），不动系统 Node。
+3. `awos setup`：把 codex、pi、dsh 按 `config/awos.toml [runtimes]` 里固定的版本装进 `runtime/<名字>`（npm，不跑安装脚本，不装到全局；PATH 上已有的 CLI 优先）；然后找本机已有的凭据接上（见 §2.2）。
 
 ```bash
-scripts/install.sh                  # uv venv（Python 3.13）+ 依赖 + var/ 目录 + Node 检查；可重复执行。--service 顺带注册 launchd
+scripts/install.sh                  # 一键安装；--service 顺带注册 launchd，--skip-runtimes 不装 agent CLI
+scripts/awos setup                  # 只重装 agent CLI / 重新找凭据（例如刚设置了 DEEPSEEK_API_KEY 之后）
 scripts/awos doctor                 # 体检：执行器、传感器、daemon 状态
 scripts/awos daemon                 # 前台运行（调试）；或 scripts/awos ensure-running 在后台启动（独立会话，关掉终端不受影响）
 scripts/service-install.sh          # 注册 LaunchAgent（登录自启 + 崩溃自动重启）；--dry-run 只打印 plist
@@ -72,6 +77,39 @@ scripts/service-uninstall.sh        # 注销 LaunchAgent 并停止 daemon，var/
 - 通知：`toast` 通道在 macOS 上用 `osascript` 发到通知中心（来源显示为"脚本编辑器"，在 系统设置 → 通知 里允许它）。`action`/`high` 级别带提示音；点击通知不会打开链接，链接在控制台和手机推送里。
 - `gh`、`node` 在 macOS 上找不到 `runtime/` 下的副本时，会用 PATH 上的版本；Windows 上仍然只用 `runtime/` 下的。
 - 执行器子进程放在独立的进程组里，超时、取消或恢复时整组杀掉（对应 Windows 的 Job Object / `taskkill /T`）。
+- 系统代理：macOS 上 GUI 应用自动走"系统设置"里的代理，命令行工具不会。环境变量里没有 `HTTPS_PROXY` 时，执行器会读 `scutil --proxy` 把系统代理传给 agent（`network.use_system_proxy = false` 可关）。
+
+### 2.2 Agent 凭据（`awos setup`）
+
+只引用本机已有的登录，不复制、不打印密钥；`var/secrets.toml` 已有的段落不改，新写的段落文件权限 0600。
+
+| 执行器 | 找什么 | 写到哪里 |
+|---|---|---|
+| codex | `~/.codex/auth.json`（ChatGPT 登录，与 Codex 应用/CLI 共用）；没有登录但环境里有 `OPENAI_API_KEY` 时执行 `codex login --with-api-key` | Codex 自己的 `~/.codex` |
+| dsh | 环境变量 `DEEPSEEK_API_KEY`；否则 DeepSeek Harness 应用的账号登录 `~/.dsh/.credentials.yaml` | `[dsh] env` 或 `[dsh] provider/model/credentials`（登录文件以链接方式接入隔离的 `runtime/dsh-home`） |
+| pi | 环境变量 `DEEPSEEK_API_KEY`；否则已有的 Pi 登录 `~/.pi/agent/auth.json` | `[pi] env` 或 `[pi] agent_dir` |
+| claude | 用 Claude Code 自己的登录 | — |
+
+DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API key。设置 `DEEPSEEK_API_KEY` 后重跑 `scripts/awos setup` 即可。
+
+### 2.3 Agent 沙箱（最小权限）
+
+每个 agent 进程只拿到它这次任务需要的权限（`src/awos/executors/sandbox.py`，`[sandbox]` 配置段）。macOS 不允许 Seatbelt 嵌套，所以自带沙箱的 agent 用它自己的、配好的沙箱，没有沙箱的由 AgentWorkOS 套一层 `sandbox-exec`：
+
+| 执行器 | macOS 上的约束 |
+|---|---|
+| claude | 打开 Claude Code 自带沙箱：Bash 只能写工作区、不能联网、没有"不走沙箱"的后门（`allowUnsandboxedCommands=false`，沙箱起不来就失败）；`--add-dir` 给的目录只读；凭据文件 Read/Edit 一律拒绝 |
+| codex | Codex 权限配置：全盘只读、凭据文件不可读、只能写工作区（只读任务不能写）和本次运行的私有临时目录、命令不能联网 |
+| dsh | 整个 DSH 进程套 AgentWorkOS 的 Seatbelt：只能写工作区（只读任务不能写）、`runtime/dsh-home` 和私有临时目录，凭据文件不可读（自己的登录文件除外）；DSH 自带沙箱只限制写、还放行临时目录，所以在 macOS 上改用外层这个 |
+| pi | Pi 没有沙箱，同上套 Seatbelt；只读任务连 bash 工具都没有 |
+
+另外所有执行器的环境变量都会去掉看起来像凭据的变量（`*TOKEN*`、`*KEY*`、`*SECRET*`、`SSH_AUTH_SOCK`、`GH_TOKEN` 等），只保留该执行器自己登录要用的前缀（claude：`ANTHROPIC_`、`CLAUDE_CODE_` 等；codex：`OPENAI_`、`CODEX_`）。`sandbox.deny_read` 可以加更多禁止读取的路径。Windows/Linux 上 codex、dsh 用各自的原生沙箱，claude 在 Linux 上有 bubblewrap 时才开沙箱。
+
+### 2.4 Git：agent 分支与独立工作区
+
+- 只有 `agent/<主题>` 分支上的 `git_commit` / `git_push` 不需要批准（`config/policy.toml [git]`）。提交在 `var/worktrees/` 下的临时 worktree 里完成，用户当前的分支、暂存区和工作区都不会被切换或改动，提交后 worktree 立即删除。
+- 其他分支、main/master 和远端默认分支、MR/PR 都要批准。
+- 敏感任务的 git 动作一律要批准：L1/L2 只读任务；私人类别（`routing.private_categories`）；带邮件或私人内容、只能交给可信执行器的任务；来自 `no_auto_sources`（mailmaster、gmail、notion、github）的任务。
 
 ## 3. 日志和数据在哪里
 

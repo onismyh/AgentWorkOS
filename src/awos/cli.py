@@ -379,6 +379,11 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def cmd_setup(args) -> int:
+    from .runtimes import setup
+    return setup(install=not args.no_install, credentials=not args.no_credentials, only=args.only or None)
+
+
 def cmd_backup(args) -> int:
     from . import db
     from .timeutil import local_now
@@ -413,6 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     ml.add_argument("--days", type=int, default=30); ml.add_argument("--limit", type=int, default=20)
     ml.add_argument("--chars", type=int, default=6000); ml.set_defaults(fn=cmd_mail)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
+    su = sub.add_parser("setup", help="install codex / pi / dsh into runtime/ and wire up credentials found on this machine")
+    su.add_argument("--no-install", action="store_true"); su.add_argument("--no-credentials", action="store_true")
+    su.add_argument("--only", action="append", choices=["codex", "pi", "dsh"]); su.set_defaults(fn=cmd_setup)
     sub.add_parser("backup").set_defaults(fn=cmd_backup)
     args = p.parse_args(argv)
     return int(args.fn(args) or 0)

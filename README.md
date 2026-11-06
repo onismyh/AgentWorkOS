@@ -9,7 +9,7 @@
 感知（git · 文档 · AI 会话历史 · 学校/163 邮件 · Gmail · Notion · Zotero · 手动投递）
   → 分诊（LLM：分类、优先级、L1–L5 自主等级、是否自动启动）
   → 规划（复杂任务拆成可以并行的子任务 DAG）
-  → 执行（Codex / Claude / Pi / DSH 子进程，隔离工作区，超时，重试，独立质检）
+  → 执行（Codex / Claude / Pi / DSH 子进程，每个都在最小权限沙箱里，隔离工作区，超时，重试，独立质检）
   → HITL（对外动作和关键决策进 Outbox → 桌面通知（Windows / macOS）/ 手机推送 → 你一键确认）
   → 交付（交付物 + 总结，每天早晚各一份摘要）
 ```
@@ -31,7 +31,7 @@ start http://127.0.0.1:8765/
 macOS（详见 `docs/runbook.md` §2.1）：
 
 ```bash
-scripts/install.sh                 # uv + Python 3.13 venv + 依赖
+scripts/install.sh                 # 一键：uv + Python 3.13 + 依赖 + Node + codex/pi/dsh + 本机已有凭据
 scripts/awos doctor
 scripts/awos daemon                # 前台；或 scripts/service-install.sh 注册 launchd 登录自启
 open http://127.0.0.1:8765/

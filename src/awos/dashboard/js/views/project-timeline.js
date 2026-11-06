@@ -35,7 +35,7 @@ const localDay = (ts) => { const d = new Date(ts); return Number.isNaN(+d) ? '' 
 const hid = (key) => { let x = 0x811c9dc5; for (const c of String(key)) { x ^= c.charCodeAt(0); x = Math.imul(x, 0x01000193) >>> 0; } return x.toString(36); };
 const inboxHref = (a) => `#/inbox?sel=${enc(a.ref.approval ? `approval:${a.ref.approval}` : `task:${a.ref.task}`)}`;
 const PILE = '__none__';   // the 未归类 pile: it cannot be archived
-const archiveData = (key, name, st) => ({ key, name, open: st?.tasks_open ?? 0, asks: st?.open_asks ?? 0 });
+const archiveData = (key, name, st) => ({ key, name, open: st?.close_open ?? 0, asks: st?.close_asks ?? 0 });
 const dueWord = (days) => (days == null || days > 14 ? '' : days < 0 ? `（已逾期 ${-days} 天）` : days === 0 ? '（今天）' : `（${days} 天后）`);
 
 export const modeSwitch = (mode) => seg([{ key: 'board', label: '任务看板', icon: 'kanban' }, { key: 'timeline', label: '项目时间线', icon: 'flag' }], mode, { act: 'board-mode', key: 'mode', label: '看板模式' });
