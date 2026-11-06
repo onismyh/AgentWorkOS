@@ -99,6 +99,15 @@ def cmd_daemon(args) -> int:
             time.sleep(5)
 
     threading.Thread(target=watch_stop, daemon=True, name="stop-watch").start()
+    if sys.platform != "win32":
+        import signal
+
+        def on_term(signum, frame) -> None:  # launchctl / kill: shut down like the stop file does
+            log.info("signal %s; shutting down", signum)
+            sched.stop()
+
+        signal.signal(signal.SIGTERM, on_term)
+        signal.signal(signal.SIGHUP, on_term)
     try:
         sched.run_forever()
     except KeyboardInterrupt:
@@ -119,16 +128,32 @@ def cmd_daemon(args) -> int:
     return 0
 
 
+LAUNCHD_LABEL = "com.agentworkos.daemon"  # scripts/service-install.sh
+
+
 def _spawn_daemon() -> int:
     exe = Path(sys.executable)
     pyw = exe.with_name("pythonw.exe") if exe.name.lower() == "python.exe" else exe
-    flags = 0
     if sys.platform == "win32":
-        flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        detach: dict = {"creationflags": 0x00000008 | 0x00000200 | 0x08000000}
+    else:
+        detach = {"start_new_session": True}  # own session: survives the terminal / watchdog that started it
     p = subprocess.Popen([str(pyw if pyw.exists() else exe), "-X", "utf8", "-m", "awos.cli", "daemon"], cwd=str(ROOT),
-                         creationflags=flags, close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+                         close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **detach)
     return p.pid
+
+
+def _launchd_kickstart() -> bool:
+    """macOS: start the daemon through its LaunchAgent if one is loaded (so launchd, not us, owns the process)."""
+    target = f"gui/{os.getuid()}/{LAUNCHD_LABEL}"
+    try:
+        if subprocess.run(["launchctl", "print", target], capture_output=True, timeout=15).returncode != 0:
+            return False
+        return subprocess.run(["launchctl", "kickstart", target], capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def cmd_ensure_running(args) -> int:
@@ -148,6 +173,9 @@ def cmd_ensure_running(args) -> int:
         if r.returncode == 0:
             print("daemon task started via Task Scheduler")
             return 0
+    elif sys.platform == "darwin" and _launchd_kickstart():
+        print(f"daemon started via launchd ({LAUNCHD_LABEL})")
+        return 0
     pid = _spawn_daemon()
     print(f"daemon started pid={pid}")
     return 0

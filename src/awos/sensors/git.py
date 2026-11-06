@@ -12,19 +12,19 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from ..osutil import NO_WINDOW
 from ..repo import fingerprint
 from ._common import SKIP_DIRS, is_under, iso_week, local_str, norm, self_excluded, trunc, utc_iso
 from .base import Sensor, SensorContext, SignalDraft
 
 _ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 REDISCOVER_S = 24 * 3600
 
 
 def _git(repo: str, *args: str, timeout: float = 20) -> tuple[int, str]:
     try:
         p = subprocess.run(["git", "-C", repo, "-c", "core.quotepath=off", *args], capture_output=True,
-                           timeout=timeout, env=_ENV, creationflags=_NO_WINDOW)
+                           timeout=timeout, env=_ENV, **NO_WINDOW)
     except (subprocess.TimeoutExpired, OSError) as e:
         return -1, str(e)
     return p.returncode, p.stdout.decode("utf-8", "replace")

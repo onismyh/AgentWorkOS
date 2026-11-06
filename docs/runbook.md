@@ -1,6 +1,6 @@
 # AgentWorkOS 运维手册（Runbook）
 
-> 适用：Windows 10/11，当前用户登录时在后台运行。仓库路径含空格和中文（`D:\phd\AgentWorkOS`），下文所有命令都已按这种路径测试过。
+> 适用：Windows 10/11（主要平台），以及 macOS（见 §2.1）；当前用户登录时在后台运行。仓库路径含空格和中文（`D:\phd\AgentWorkOS`），下文所有命令都已按这种路径测试过。
 > 约定：`<root>` = 仓库根目录；PowerShell 命令在 `<root>` 下执行。
 
 ## 1. 新机器安装
@@ -53,6 +53,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\service-uninstall.ps
 
 - 查看状态：`scripts\awos.cmd status`；`Get-ScheduledTask -TaskPath '\AgentWorkOS\' | Get-ScheduledTaskInfo`（`LastTaskResult=0` 表示正常）。
 - **健康检查不要用 `Invoke-WebRequest`**：本机系统代理不会绕过 127.0.0.1，PS 5.1 的请求会被发往代理而失败。改用 `scripts\awos.cmd status`，或者 `curl.exe --noproxy "*" http://127.0.0.1:8765/`。
+
+### 2.1 macOS
+
+前置：git、[uv](https://docs.astral.sh/uv/)（`curl -LsSf https://astral.sh/uv/install.sh | sh` 或 `brew install uv`）。pi / dsh 需要 Node ≥ 22.19：优先用 `runtime/node/bin/node`，没有就用 PATH 上的 `node`（如 Homebrew）。
+
+```bash
+scripts/install.sh                  # uv venv（Python 3.13）+ 依赖 + var/ 目录 + Node 检查；可重复执行。--service 顺带注册 launchd
+scripts/awos doctor                 # 体检：执行器、传感器、daemon 状态
+scripts/awos daemon                 # 前台运行（调试）；或 scripts/awos ensure-running 在后台启动（独立会话，关掉终端不受影响）
+scripts/service-install.sh          # 注册 LaunchAgent（登录自启 + 崩溃自动重启）；--dry-run 只打印 plist
+scripts/service-uninstall.sh        # 注销 LaunchAgent 并停止 daemon，var/ 保留
+```
+
+- LaunchAgent：`~/Library/LaunchAgents/com.agentworkos.daemon.plist`，`RunAtLoad` + `KeepAlive{SuccessfulExit=false}`：崩溃后由 launchd 拉起（间隔 60 秒），`awos stop` 这种正常退出不会被拉起，因此不需要 Windows 上的 Watchdog。launchd 只给最小 PATH，注册时会把当前终端的 PATH 写进 plist，安装了新的 CLI（codex、gh 等）后重跑一次 `service-install.sh`。
+- `awos ensure-running` 在 macOS 上优先 `launchctl kickstart` 已加载的 LaunchAgent，否则直接后台启动。`launchctl bootout`/`kill` 发送的 SIGTERM 会让 daemon 像 stop 文件那样正常退出。
+- 本机覆盖写在 `config/local.toml`（不进 git）：`sensors.git.roots` / `sensors.files.roots` 改成 Mac 上的目录；Mail Master 的本地库只在 Windows 上，`sensors.mailmaster.enabled = false`；Zotero 默认数据目录是 `~/Zotero`。
+- 通知：`toast` 通道在 macOS 上用 `osascript` 发到通知中心（来源显示为"脚本编辑器"，在 系统设置 → 通知 里允许它）。`action`/`high` 级别带提示音；点击通知不会打开链接，链接在控制台和手机推送里。
+- `gh`、`node` 在 macOS 上找不到 `runtime/` 下的副本时，会用 PATH 上的版本；Windows 上仍然只用 `runtime/` 下的。
+- 执行器子进程放在独立的进程组里，超时、取消或恢复时整组杀掉（对应 Windows 的 Job Object / `taskkill /T`）。
 
 ## 3. 日志和数据在哪里
 

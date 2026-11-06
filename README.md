@@ -1,7 +1,7 @@
 # AgentWorkOS
 
 > 本地常驻、主动感知、理解个人上下文、自主推进任务、关键节点人工确认的"个人超级智能"操作系统。
-> Windows 单机 · Python 3.13 + SQLite + FastAPI · 执行器：Codex / Claude Code / Pi / DSH
+> Windows / macOS 单机 · Python 3.13 + SQLite + FastAPI · 执行器：Codex / Claude Code / Pi / DSH
 
 ## 它做什么
 
@@ -10,7 +10,7 @@
   → 分诊（LLM：分类、优先级、L1–L5 自主等级、是否自动启动）
   → 规划（复杂任务拆成可以并行的子任务 DAG）
   → 执行（Codex / Claude / Pi / DSH 子进程，隔离工作区，超时，重试，独立质检）
-  → HITL（对外动作和关键决策进 Outbox → Windows 通知 / 手机推送 → 你一键确认）
+  → HITL（对外动作和关键决策进 Outbox → 桌面通知（Windows / macOS）/ 手机推送 → 你一键确认）
   → 交付（交付物 + 总结，每天早晚各一份摘要）
 ```
 
@@ -26,6 +26,15 @@ scripts\awos.cmd daemon
 powershell -ExecutionPolicy Bypass -File scripts\service-install.ps1
 # 4. 打开控制台
 start http://127.0.0.1:8765/
+```
+
+macOS（详见 `docs/runbook.md` §2.1）：
+
+```bash
+scripts/install.sh                 # uv + Python 3.13 venv + 依赖
+scripts/awos doctor
+scripts/awos daemon                # 前台；或 scripts/service-install.sh 注册 launchd 登录自启
+open http://127.0.0.1:8765/
 ```
 
 常用命令：`awos status` · `awos inbox` · `awos add "标题" -d "描述"` · `awos approve <id> <option>` · `awos sensors` · `awos sensor-run git` · `awos context refresh` · `awos digest`
@@ -57,7 +66,7 @@ start http://127.0.0.1:8765/
 config/    默认配置与策略（进 git）；local.toml 放本机覆盖（不进 git）
 src/awos/  核心代码：db / repo / brain(triage, policy, planner, context) / engine(scheduler, worker, recovery)
            / executors / sensors / hitl(outbox, notify, tokens) / api + dashboard
-scripts/   安装、服务注册、awos.cmd
+scripts/   安装、服务注册：awos.cmd + *.ps1（Windows），awos + *.sh（macOS）
 var/       运行数据（不进 git）：awos.db、runs/、workspaces/、artifacts/、logs/、backups/、context/
 runtime/   便携 Node、Pi、DSH（不进 git）
 ```

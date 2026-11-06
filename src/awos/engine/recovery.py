@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import ctypes
 import logging
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +10,7 @@ from .. import repo
 from ..config import load_config
 from ..db import utcnow
 from ..models import ApprovalStatus, TaskStatus
+from ..osutil import kill_process_tree
 
 log = logging.getLogger("awos.recovery")
 
@@ -38,8 +38,7 @@ def pid_alive(pid: int | None) -> bool:
 
 
 def kill_tree(pid: int) -> None:
-    if sys.platform == "win32":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30)
+    kill_process_tree(int(pid))
 
 
 def recover_task(task: dict, reason: str) -> None:

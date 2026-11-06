@@ -1,4 +1,5 @@
-"""Notifications: native Windows toast (PowerShell 5.1 + WinRT, nothing to install) and optional phone webhooks.
+"""Notifications: native desktop notification ("toast" channel: Windows toast via PowerShell 5.1 + WinRT, macOS
+Notification Center via osascript; nothing to install) and optional phone webhooks.
 
     notify(title, body, level="info"|"action"|"high", ref_type=, ref_id=, url=) -> [notification ids]
 
@@ -23,6 +24,7 @@ import os
 import re
 import smtplib
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -212,10 +214,46 @@ def _ps_text(raw: bytes | None) -> str:
     return re.sub(r"#< CLIXML\s*(<Objs.*?</Objs>)?", "", s, flags=re.S).strip()
 
 
+# AppleScript reads title/body from argv, so no user text is ever interpolated into the script source.
+MAC_NOTIFY_SCRIPT = ("on run argv\n"
+                     "  if (count of argv) > 3 then\n"
+                     "    display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv) "
+                     "sound name (item 4 of argv)\n"
+                     "  else\n"
+                     "    display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv)\n"
+                     "  end if\n"
+                     "end run")
+MAC_BODY_CHARS = 240
+
+
+def build_mac_notify_command(title: str, body: str, *, level: str = "info") -> list[str]:
+    """osascript argv for a macOS Notification Center banner (title = app name, subtitle = message title)."""
+    text = " ".join((body or "").split())
+    text = text if len(text) <= MAC_BODY_CHARS else text[: MAC_BODY_CHARS - 1] + "…"
+    argv = ["/usr/bin/osascript", "-e", MAC_NOTIFY_SCRIPT, "AgentWorkOS", text or " ", (title or "")[:120]]
+    if level in ("action", "high"):
+        argv.append("Glass")
+    return argv
+
+
+def _send_mac_notification(m: Message) -> str:
+    try:
+        cp = subprocess.run(build_mac_notify_command(m.title, m.body, level=m.level), capture_output=True,
+                            timeout=TOAST_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"notification timed out after {TOAST_TIMEOUT}s") from None
+    if cp.returncode != 0:
+        err = (cp.stderr or b"").decode("utf-8", "replace").strip()
+        raise RuntimeError(f"osascript failed (exit {cp.returncode}): {err}"[:400])
+    return "OK"
+
+
 def send_toast(m: Message, *, tag: str | None = None) -> str:
-    """Show a toast; returns the PowerShell status line. Raises RuntimeError on failure."""
+    """Show a desktop notification; returns a status line. Raises RuntimeError on failure."""
+    if sys.platform == "darwin":
+        return _send_mac_notification(m)
     if os.name != "nt":
-        raise RuntimeError("toast is only supported on Windows")
+        raise RuntimeError("desktop notifications are only supported on Windows and macOS")
     app_id = str(load_config().get("notify.toast_app_id") or POWERSHELL_AUMID)
     tag = tag or hashlib.sha1(f"{m.title}|{m.url}".encode("utf-8")).hexdigest()[:16]
     argv = build_toast_command(build_toast_xml(m.title, m.body, url=m.url, level=m.level), app_id=app_id, tag=tag)

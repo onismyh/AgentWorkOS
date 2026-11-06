@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# AgentWorkOS CLI launcher (macOS / Linux): `awos <args>` -> .venv/bin/python -X utf8 -m awos.cli <args>
+# Resolves its own location through symlinks, so it can be linked into ~/.local/bin or /usr/local/bin.
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+PY="$ROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "AgentWorkOS: $PY not found - run scripts/install.sh first." >&2
+  exit 127
+fi
+export PYTHONUTF8=1
+exec "$PY" -X utf8 -m awos.cli "$@"

@@ -462,3 +462,29 @@ def test_approval_link(env):
     link = tokens.approval_link(aid, "approve")
     assert link.startswith("http://127.0.0.1:9999/approve/")
     assert tokens.verify(link.rsplit("/", 1)[1]) == (aid, "approve")
+
+
+def test_mac_notify_command_passes_text_as_argv():
+    evil = 'x" & do shell script "touch /tmp/pwned" & "'
+    argv = nt.build_mac_notify_command(evil, "第一行\n第二行  " + "长" * 500, level="info")
+    assert argv[:3] == ["/usr/bin/osascript", "-e", nt.MAC_NOTIFY_SCRIPT]
+    assert evil not in nt.MAC_NOTIFY_SCRIPT and argv[5] == evil  # user text never becomes script source
+    assert argv[3] == "AgentWorkOS" and argv[4].startswith("第一行 第二行 ") and len(argv[4]) == nt.MAC_BODY_CHARS
+    assert len(argv) == 6  # no sound for info
+    assert nt.build_mac_notify_command("t", "", level="high")[-1] == "Glass"
+
+
+def test_send_toast_on_macos(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(nt.sys, "platform", "darwin")
+    monkeypatch.setattr(nt.subprocess, "run", fake_run)
+    assert nt.send_toast(nt.Message("标题", "正文", level="action")) == "OK"
+    assert calls[0][0] == "/usr/bin/osascript" and calls[0][-1] == "Glass"
+    monkeypatch.setattr(nt.subprocess, "run", lambda a, **kw: subprocess.CompletedProcess(a, 1, b"", b"boom"))
+    with pytest.raises(RuntimeError, match="boom"):
+        nt.send_toast(nt.Message("t", "b"))
