@@ -581,7 +581,8 @@ def _tidy_note(text: str) -> str:
     """A progress note as one readable phrase: no leftover bracket from a nested project name, no time stamp, no file paths."""
     s = re.sub(r"^[）)\s]+", "", str(text or ""))
     s = re.sub(r"^\d{2}-\d{2}(?: \d{2}:\d{2})?\s*", "", s)
-    s = re.sub(r"[A-Za-z]:[/\\][^\s，。；、）)]*", "", s)
+    s = re.sub(r"(?<![A-Za-z])[A-Za-z]:[/\\][^\s，。；、）)]*", "", s)  # drive paths, not the "s:/" of https://
+    s = re.sub(r"(?<![\w.:/~])(?:~|/(?:Users|home|Volumes|private|tmp|var|opt|mnt))/[^\s，。；、）)]*", "", s)  # macOS / Linux
     return re.sub(r"\s{2,}", " ", s).strip()
 
 

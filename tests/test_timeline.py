@@ -369,3 +369,11 @@ console.log(JSON.stringify({{ order: x.a < x.b && x.b < x.c && x.g > x.b, paths:
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["order"] and out["paths"] and out["wrapped"] == 3 and out["rows"] and out["cycle"] and out["safe"]
     assert len(out["w"]) == 2 and out["w"][1].endswith("…")
+
+
+def test_tidy_note_drops_paths_from_any_os_but_keeps_urls():
+    from awos.api.timeline import _tidy_note
+    assert _tidy_note("修好了 /Users/me/proj/a.py 里的bug") == "修好了 里的bug"
+    assert _tidy_note("见 D:\\phd\\a.docx 第三章") == "见 第三章"
+    assert _tidy_note("更新 ~/papers/x.tex 等审阅") == "更新 等审阅"
+    assert _tidy_note("参考 https://x.com/a 的说明") == "参考 https://x.com/a 的说明"

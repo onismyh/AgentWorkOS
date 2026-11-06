@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..brain import policy
 from ..config import load_config
+from ..osutil import NO_WINDOW, bundled_or_path
 
 # A plain branch name: no refspecs (`HEAD:main`), no `+force` prefix, no option-looking names, no `..` or `//`.
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -22,13 +23,12 @@ NEVER_COMMIT = re.compile(
 
 
 def gh_exe() -> Path | None:
-    p = load_config().root / "runtime" / "gh" / "bin" / "gh.exe"
-    return p if p.exists() else None
+    return bundled_or_path(load_config().root / "runtime" / "gh" / "bin" / "gh", "gh")
 
 
 def git(repo_dir: Path, *args: str, timeout: int = 300, extra: list[str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *(extra or []), "-C", str(repo_dir), *args], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout, creationflags=0x08000000)
+                          encoding="utf-8", errors="replace", timeout=timeout, **NO_WINDOW)
 
 
 def _credential_args() -> list[str]:
@@ -202,7 +202,7 @@ def push(payload: dict) -> dict:
 
 def _run_gh(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          timeout=120, creationflags=0x08000000)
+                          timeout=120, **NO_WINDOW)
 
 
 def open_mr(payload: dict) -> dict:
@@ -210,7 +210,7 @@ def open_mr(payload: dict) -> dict:
     repo_dir = repo_dir_of(payload)
     gh = gh_exe()
     if gh is None:
-        raise RuntimeError("gh is not installed under runtime/gh")
+        raise RuntimeError("gh is not installed (runtime/gh or PATH)")
     title, body = (payload.get("title") or "").strip(), (payload.get("body") or "").strip()
     branch = _effective_branch(repo_dir, payload)
     if not title or not branch or not valid_branch(branch):
