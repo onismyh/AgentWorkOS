@@ -153,7 +153,7 @@ class PiExecutor(Executor):
         model = spec.model or runtime_secrets("pi").get("model")
         parser = PiParser(on_event)
         prompt = schema_prompt(spec.prompt, spec.output_schema)
-        from . import sandbox
+        from . import egress, sandbox
         home = prepare_home()
         auth = Path(os.path.realpath(home / "auth.json"))
         # Pi may write its scratch, caches and its own login (+ the lock it takes next to auth.json); not its tools (bin/:
@@ -161,13 +161,15 @@ class PiExecutor(Executor):
         # anything the next run would load or execute.
         (home / "tmp").mkdir(parents=True, exist_ok=True)
         writable = [home / "tmp", home / "auth.json.lock"] + ([] if spec.sandbox == "read-only" else [spec.cwd])
-        argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
-                                    readable=[spec.cwd, home, *spec.add_dirs],
-                                    writable_files=[home / "models-store.json", home / "mcp.log"],
-                                    own_files=[auth, auth.with_name(auth.name + ".lock")])
-        pr = run_process(argv, cwd=spec.cwd, stdin_text=prompt, env={**build_env(spec), **sb_env},
-                         timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir, on_stdout=parser.feed,
-                         on_stderr=lambda l: None, on_pid=spec.on_pid, proxy=not sandbox.enabled())  # no localhost when confined
+        with egress.EgressProxy([*sandbox.allowed_domains(spec), *sandbox.AGENT_DOMAINS["pi"]]) as px:
+            argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
+                                        readable=[spec.cwd, home, *spec.add_dirs],
+                                        writable_files=[home / "models-store.json", home / "mcp.log"],
+                                        own_files=[auth, auth.with_name(auth.name + ".lock")], proxy=px)
+            pr = run_process(argv, cwd=spec.cwd, stdin_text=prompt, env={**build_env(spec), **sb_env},
+                             timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir, on_stdout=parser.feed,
+                             on_stderr=lambda l: None, on_pid=spec.on_pid, proxy=False)  # network only through px
+        egress.report(px, on_event)
         base: dict[str, Any] = dict(exit_code=pr.exit_code, final_text=parser.final_text, tokens_in=parser.tokens_in,
                                     tokens_out=parser.tokens_out, cost_usd=parser.cost, model=parser.model or model,
                                     session_id=parser.session_id)

@@ -77,18 +77,19 @@ def test_seatbelt_profile_shape(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "private_paths", lambda: [var])
     prof = sandbox.seatbelt_profile(writable=[tmp_path / "a b"], readable=[tmp_path, Path(var) / "ws"],
                                     writable_files=[tmp_path / "a b" / "profiles" / "root.yml"],
-                                    readonly_within=[tmp_path / "a b" / "profiles"], own_files=[Path("/x/\"q")])
+                                    readonly_within=[tmp_path / "a b" / "profiles"], own_files=[Path("/x/\"q")], proxy_port=4567)
     lines = prof.splitlines()
     assert lines[:3] == ["(version 1)", "(allow default)", "(deny file-write*)"]
     assert f'(subpath "{os.path.realpath(tmp_path / "a b")}")' in prof and '"/x/\\"q"' in prof
     order = [next(i for i, l in enumerate(lines) if l.startswith(p)) for p in
              ("(allow file-write* (subpath", "(deny file-write* (subpath", "(allow file-write* (literal", "(deny file-read* ",
               "(allow file-read* ", "(deny file-read* file-write*", "(allow file-read* file-write*",
-              '(deny network-outbound (remote ip "localhost:*"))', "(deny network-outbound (remote unix-socket))")]
+              "(deny network-outbound)", '(allow network-outbound (remote ip "localhost:4567"))')]
     assert order == sorted(order)                       # each narrower rule follows the broader one (last match wins)
     reallow = next(l for l in lines if l.startswith("(allow file-read* ") and "file-write" not in l)
     assert os.path.join(var, "ws") in reallow and f'(subpath "{os.path.realpath(tmp_path)}")' not in reallow   # a parent of var/ never unlocks it
-    assert "localhost:7897" not in prof and "mDNSResponder" in prof and "(deny appleevent-send)" in prof and "launchservicesd" in prof
+    assert "mDNSResponder" in prof and "(deny appleevent-send)" in prof and "launchservicesd" in prof
+    assert "localhost:" not in sandbox.seatbelt_profile(writable=[], readable=[])          # no proxy: no network at all
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS Seatbelt")
@@ -117,6 +118,8 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
     ws, logs, outside = var / "workspaces" / "mine", tmp_path / "logs", tmp_path / "outside.txt"
     ws.mkdir()
     logs.mkdir()
+    from awos.executors.egress import EgressProxy
+    px = EgressProxy(["example.org"], upstream=None).__enter__()
     probe = tmp_path / "probe.py"
     probe.write_text(textwrap.dedent(f"""
         import os, socket, tempfile
@@ -128,6 +131,9 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
                          ("awos_db", lambda: open({str(var / "awos.db")!r}).read()),
                          ("localhost", lambda: socket.create_connection(("127.0.0.1", {srv.server_port}), timeout=3).close()),
                          ("unix_socket", lambda: socket.socket(socket.AF_UNIX).connect({str(sock_path)!r})),
+                         ("via_proxy_to_loopback", lambda: (lambda c: (c.sendall(b"CONNECT 127.0.0.1:{srv.server_port} HTTP/1.1\\r\\n\\r\\n"),
+                              (_ for _ in ()).throw(OSError("refused")) if b" 200" not in c.recv(200) else None))(
+                              socket.create_connection(("127.0.0.1", {px.port}), timeout=3))),
                          ("tmp", lambda: tempfile.NamedTemporaryFile(delete=False).write(b"x"))]:
             try:
                 fn(); res[name] = True
@@ -135,34 +141,43 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
                 res[name] = False
         print(res)
     """), encoding="utf-8")
-    argv, env = sandbox.wrap([sys.executable, "-I", str(probe)], log_dir=logs, writable=[ws], readable=[ws], own_files=[own])
+    argv, env = sandbox.wrap([sys.executable, "-I", str(probe)], log_dir=logs, writable=[ws], readable=[ws], own_files=[own], proxy=px)
     assert argv[:2] == [sandbox.SANDBOX_EXEC, "-f"] and env["TMPDIR"].startswith(str(logs / "tmp"))
     lines: list[str] = []
     pr = proc.run_process(argv, cwd=ws, stdin_text=None, timeout_s=60, env=env, on_stdout=lines.append)
     assert pr.exit_code == 0, pr.stderr_tail
     srv.shutdown()
+    px.__exit__(None, None, None)
     us.close()
     sock_path.unlink(missing_ok=True)
     assert lines[-1] == str({"inside": True, "outside": False, "secret": False, "own_login": True, "awos_db": False,
-                             "localhost": False, "unix_socket": False, "tmp": True})
+                             "localhost": False, "unix_socket": False, "via_proxy_to_loopback": False, "tmp": True})
+    assert any(h.startswith("127.0.0.1") for h in px.denied) and env["NODE_USE_ENV_PROXY"] == "1"
+    assert env["npm_config_cache"].startswith(str(logs / "tmp"))
     assert not outside.exists() and (ws / "in.txt").exists()
 
 
 def test_claude_turns_on_its_sandbox_and_denies_credential_reads(tmp_path):
     extra = tmp_path / "ro"
     extra.mkdir()
-    argv = ClaudeExecutor().build_argv(_spec(tmp_path, sandbox="workspace-write", add_dirs=[extra]))
+    argv = ClaudeExecutor().build_argv(_spec(tmp_path, sandbox="workspace-write", add_dirs=[extra], net_allow=["example.org"]))
     settings = json.loads(argv[argv.index("--settings") + 1])
     deny = argv[argv.index("--disallowedTools") + 1]
     if sys.platform == "darwin":
         sb = settings["sandbox"]
         assert sb["enabled"] and sb["failIfUnavailable"] and not sb["allowUnsandboxedCommands"]
-        assert sb["network"]["allowedDomains"] == [] and os.path.realpath(extra) in sb["filesystem"]["denyWrite"]
+        assert "pypi.org" in sb["network"]["allowedDomains"] and "example.com" not in sb["network"]["allowedDomains"]
+        assert os.path.realpath(extra) in sb["filesystem"]["denyWrite"]
+        assert sb["filesystem"]["allowWrite"] == [os.path.realpath(tmp_path / "logs" / "tmp")]
         assert any(p.endswith("/.ssh") for p in sb["filesystem"]["denyRead"])
         from awos.config import load_config
         assert os.path.realpath(load_config().path("var")) in sb["filesystem"]["denyRead"]
         assert sb["filesystem"]["allowRead"] == [] or all("/var/" in p for p in sb["filesystem"]["allowRead"])
         assert "Read(//" in deny and set(secret_rules()) <= set(deny.split()) and "api_token)" in deny
+        assert "example.org" in sb["network"]["allowedDomains"]                                  # approved for this task
+    offline = ClaudeExecutor().build_argv(_spec(tmp_path, allow_network=False))
+    if sys.platform == "darwin":
+        assert json.loads(offline[offline.index("--settings") + 1])["sandbox"]["network"]["allowedDomains"] == []
     assert settings["disableAllHooks"] is True
     bare = ClaudeExecutor().build_argv(_spec(tmp_path, purpose="triage"))
     assert "--bare" in bare and ("--settings" in bare) == (sys.platform == "darwin")
@@ -290,3 +305,41 @@ def test_agents_without_localhost_get_no_proxy_and_authenticated_proxies_survive
     monkeypatch.setenv("HTTPS_PROXY", "http://me:pw@127.0.0.1:7897")
     assert proc.child_env()["HTTPS_PROXY"] == "http://me:pw@127.0.0.1:7897"      # claude / codex still reach their APIs
     assert "HTTPS_PROXY" not in proc.child_env(proxy=False)                       # pi / dsh: no localhost, so no local proxy
+
+
+def test_egress_proxy_allowlist_and_internal_addresses(tmp_path):
+    import http.server
+    import threading
+    from awos.executors.egress import EgressProxy, host_allowed, valid_domain
+    assert valid_domain("pypi.org") and valid_domain("*.github.com")
+    assert not any(valid_domain(d) for d in ("*.com", "127.0.0.1", "localhost", "", "a b.com", "*"))
+    assert host_allowed("files.github.com", ["*.github.com"]) and not host_allowed("github.com", ["*.github.com"])
+    assert not host_allowed("evilgithub.com", ["*.github.com", "github.com"])
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    import socket
+
+    def status(px, line: bytes) -> int:
+        c = socket.create_connection(("127.0.0.1", px.port), timeout=5)
+        c.sendall(line)
+        head = c.recv(200)
+        c.close()
+        return int(head.split()[1])
+
+    with EgressProxy(["localtest.me", "example.org"], upstream=None) as px:
+        port = srv.server_port
+        assert status(px, f"GET http://127.0.0.1:{port}/ HTTP/1.1\r\nHost: x\r\n\r\n".encode()) == 403        # IP literal
+        assert status(px, f"CONNECT localtest.me:{port} HTTP/1.1\r\n\r\n".encode()) == 403                     # port + resolves to 127.0.0.1
+        assert status(px, b"CONNECT not-allowed.example:443 HTTP/1.1\r\n\r\n") == 403                           # not on the list
+        assert "not-allowed.example" in px.denied and any(d.startswith("localtest.me") for d in px.denied)
+    srv.shutdown()
+
+
+def test_allowed_domains_follow_the_run_and_the_users_grants(tmp_path):
+    spec = _spec(tmp_path, net_allow=["example.org", "127.0.0.1", "*.com"])
+    doms = sandbox.allowed_domains(spec)
+    assert "pypi.org" in doms and "example.org" in doms and "127.0.0.1" not in doms and "*.com" not in doms
+    assert sandbox.allowed_domains(_spec(tmp_path, allow_network=False)) == []
+    args = sandbox.codex_network(["pypi.org"])
+    assert "features.network_proxy.enabled=true" in args and any('"pypi.org" = "allow"' in a for a in args)
+    assert sandbox.codex_network([]) == []

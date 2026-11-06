@@ -139,7 +139,8 @@ class ClaudeExecutor(Executor):
     def build_argv(self, spec: RunSpec) -> list[str]:
         argv = (self._argv() or ["claude"]) + ["-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
                                                "--permission-mode", "dontAsk"]
-        settings: dict = sandbox.claude_settings(cwd=spec.cwd, read_only_dirs=list(spec.add_dirs))
+        settings: dict = sandbox.claude_settings(cwd=spec.cwd, read_only_dirs=list(spec.add_dirs), log_dir=spec.log_dir,
+                                                 domains=sandbox.allowed_domains(spec))
         if spec.purpose in BARE_PURPOSES:
             argv.append("--bare")
         else:
@@ -172,8 +173,10 @@ class ClaudeExecutor(Executor):
 
     def run(self, spec: RunSpec, on_event: EventSink, cancel: threading.Event) -> RunResult:
         parser = ClaudeParser(on_event)
+        (spec.log_dir / "tmp").mkdir(parents=True, exist_ok=True)
+        env = {**sandbox.cache_env(spec.log_dir / "tmp"), **(spec.env or {})} if sandbox.claude_sandboxed() else spec.env
         pr = run_process(self.build_argv(spec), cwd=spec.cwd, stdin_text=spec.prompt, timeout_s=spec.timeout_s, cancel=cancel,
-                         log_dir=spec.log_dir, env=spec.env, on_stdout=parser.feed, on_pid=spec.on_pid, keep_secrets=keep_env())
+                         log_dir=spec.log_dir, env=env, on_stdout=parser.feed, on_pid=spec.on_pid, keep_secrets=keep_env())
         res = parser.result or {}
         usage = res.get("usage") or {}
         final = res.get("result") if isinstance(res.get("result"), str) else "\n".join(parser.texts)

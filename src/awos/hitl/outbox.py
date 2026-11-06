@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import repo
+from .. import db, repo
 from ..brain import policy
 from ..config import load_config
 from ..db import dumps, utcnow
@@ -86,6 +86,9 @@ def create_from_result(task: dict, run_id: str, out: dict) -> list[str]:
                 repo.decide_approval(aid, "approve", via="auto", actor="system")
                 execute_action(repo.get_approval(aid))
                 continue
+        if atype == "grant_network":
+            risk, note = _network_note(payload)
+            notes.append(note)
         if atype in ("git_commit", "git_push"):
             ok, why = gitops.auto_allowed(atype, payload, task=task)
             if ok and ids:  # an earlier decision/action of this result still waits for the human: keep the order
@@ -111,7 +114,62 @@ def create_from_result(task: dict, run_id: str, out: dict) -> list[str]:
                             if risk != "high" else "请仔细核对后再批准：这是高风险动作，批准前务必逐项确认「批准后将执行的内容」。"),
             options=ACTION_OPTIONS, risk=risk,
             payload={**payload, "_hash": payload_hash(payload)}, expires_at=_expiry(risk)))
+    sid = suggest_network(task, run_id, out.get("proposed_actions") or [])
+    if sid:
+        ids.append(sid)
     return ids
+
+
+def _grant_network(approval: dict, payload: dict) -> dict:
+    """The user approved more network for one task: remember the domains on the task; maybe_resume re-runs it."""
+    from ..executors.egress import valid_domain
+    task_id = approval.get("task_id")
+    domains = sorted({str(d).strip().lower() for d in payload.get("domains") or [] if valid_domain(str(d))})
+    if not task_id or not domains:
+        return {"done": False, "details": "没有可放行的域名（只接受普通域名，不接受 IP、localhost 或通配整个顶级域）"}
+    t = repo.get_task(task_id) or {}
+    have = list((t.get("meta") or {}).get("network_allow") or [])
+    repo.merge_task_meta(task_id, network_allow=sorted(set(have) | set(domains)))
+    repo.log_event("task", task_id, "network_granted", {"domains": domains}, actor="user")
+    return {"done": True, "details": f"已为这个任务放行：{', '.join(domains)}；任务会带着这些域名重新运行"}
+
+
+def _network_note(payload: dict) -> tuple[str, str]:
+    """(risk, note) for a grant_network proposal."""
+    from ..executors.egress import valid_domain
+    doms = [str(d) for d in payload.get("domains") or []]
+    bad = [d for d in doms if not valid_domain(d)]
+    if bad or not doms:
+        return "high", f"⚠️ 这些不是可放行的普通域名，批准后也不会生效：{bad or '（空）'}"
+    return "medium", ("批准后只对这个任务放行，任务会重新运行；放行期间 agent 的命令可以向这些域名收发数据。"
+                      f"\n\n**要放行的域名**：{', '.join(doms)}")
+
+
+def suggest_network(task: dict, run_id: str, proposed: list[dict]) -> str | None:
+    """Domains the run was refused (recorded by the egress proxy) that the agent did not ask for itself: offer them to
+    the user as one grant_network approval instead of failing silently."""
+    if any((a.get("type") or "") == "grant_network" for a in proposed):
+        return None
+    from ..executors.egress import valid_domain
+    rows = db.q("SELECT data FROM run_events WHERE run_id = ? AND kind = 'network_denied'", (run_id,))
+    hosts: list[str] = []
+    for r in rows:
+        for h in (repo.loads(r["data"], {}) or {}).get("hosts") or []:
+            h = str(h).split(":")[0].lower()
+            if valid_domain(h) and h not in hosts:
+                hosts.append(h)
+    have = set((task.get("meta") or {}).get("network_allow") or [])
+    hosts = [h for h in hosts if h not in have][:20]
+    if not hosts:
+        return None
+    payload = {"domains": hosts, "reason": "运行时这些域名被沙箱拦下（系统观察到，agent 没有主动申请）"}
+    risk, note = _network_note(payload)
+    return repo.create_approval(
+        title=f"放行网络：{', '.join(hosts[:3])}{'…' if len(hosts) > 3 else ''}"[:200], kind="action", action_type="grant_network",
+        task_id=task["id"], run_id=run_id, risk=risk, options=ACTION_OPTIONS, expires_at=_expiry(risk),
+        context_md=f"{payload['reason']}。\n\n{note}\n\n---\n{_task_context(task)}",
+        recommendation="只有确认这些站点是任务需要的（例如某个包的下载源）才批准；不认识的域名请拒绝。",
+        payload={**payload, "_hash": payload_hash(payload)})
 
 
 def create_budget_approval(task: dict, error: str) -> str:
@@ -192,7 +250,8 @@ def maybe_resume(task_id: str | None) -> None:
         round_ = repo.list_approvals(task_id=task_id, limit=10)
     failed = [a for a in round_ if a["status"] == ApprovalStatus.FAILED]
     decisions = [a for a in round_ if a["kind"] == "decision" and a.get("decision") not in (None, "defer")]
-    budget_ok = [a for a in round_ if a["kind"] == "budget" and a.get("decision") == "approve"]
+    budget_ok = [a for a in round_ if (a["kind"] == "budget" and a.get("decision") == "approve")
+                 or (a.get("action_type") == "grant_network" and a["status"] == ApprovalStatus.EXECUTED)]
     rejected_all = round_ and all(a["status"] in (ApprovalStatus.REJECTED, ApprovalStatus.EXPIRED, ApprovalStatus.CANCELLED) for a in round_)
     if failed:
         repo.set_task_status(task_id, TaskStatus.WAITING_USER, f"{len(failed)} 个已批准动作执行失败，需要你处理")
@@ -259,7 +318,12 @@ def execute_action(approval: dict) -> dict:
                 ok, why = gitops.auto_allowed(atype, payload, task=task)   # the repo may have changed since the rule let it through
                 if not ok:
                     raise RuntimeError(f"no longer allowed without approval: {why}")
-            result = {"git_commit": gitops.commit, "git_push": gitops.push, "open_mr": gitops.open_mr}[atype](payload)
+            if atype == "git_commit":
+                result = gitops.commit(payload, human_approved=approval.get("decided_via") != "auto")
+            else:
+                result = {"git_push": gitops.push, "open_mr": gitops.open_mr}[atype](payload)
+        elif atype == "grant_network":
+            result = _grant_network(approval, payload)
         elif atype == "delete":
             result = _soft_delete(payload)
         elif atype == "spend":

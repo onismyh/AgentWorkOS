@@ -168,7 +168,7 @@ class DshExecutor(Executor):
         from .proc import classify_error, run_process
 
         model = spec.model or runtime_secrets("dsh").get("model")
-        from . import sandbox
+        from . import egress, sandbox
         parser = DshParser(on_event)
         home = prepare_home()
         cred = account_credentials()
@@ -178,15 +178,17 @@ class DshExecutor(Executor):
         for d in data:
             d.mkdir(parents=True, exist_ok=True)
         writable = data + ([] if spec.sandbox == "read-only" else [spec.cwd])
-        argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
-                                    readable=[spec.cwd, *spec.add_dirs],
-                                    # DSH rewrites its profile's constant root file on every boot
-                                    writable_files=[home / "profiles" / "headless" / "cordis.yml", home / ".anonymous-user-id"],
-                                    own_files=[cred] if cred else [])
-        pr = run_process(argv, cwd=spec.cwd, stdin_text=schema_prompt(spec.prompt, spec.output_schema),
-                         env={**build_env(spec), **sb_env}, timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir,
-                         on_stdout=parser.feed, on_stderr=lambda l: None, on_pid=spec.on_pid,
-                         proxy=not sandbox.enabled())  # confined agents get no localhost, so no local proxy either
+        with egress.EgressProxy([*sandbox.allowed_domains(spec), *sandbox.AGENT_DOMAINS["dsh"]]) as px:
+            argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
+                                        readable=[spec.cwd, *spec.add_dirs],
+                                        # DSH rewrites its profile's constant root file on every boot
+                                        writable_files=[home / "profiles" / "headless" / "cordis.yml", home / ".anonymous-user-id"],
+                                        own_files=[cred] if cred else [], proxy=px)
+            pr = run_process(argv, cwd=spec.cwd, stdin_text=schema_prompt(spec.prompt, spec.output_schema),
+                             env={**build_env(spec), **sb_env}, timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir,
+                             on_stdout=parser.feed, on_stderr=lambda l: None, on_pid=spec.on_pid,
+                             proxy=False)  # network only through px
+        egress.report(px, on_event)
         from ..config import load_config
         price = load_config().section("executors.dsh")  # USD per million tokens; DSH reports tokens but no cost
         cost = (parser.tokens_in * float(price.get("usd_per_mtok_in", 0.5)) + parser.tokens_cached * float(price.get("usd_per_mtok_cached", 0.05))

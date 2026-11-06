@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 import uuid
@@ -168,6 +169,8 @@ def _auto_allowed(atype: str, payload: dict) -> tuple[bool, str]:
     prefix = policy.git_policy()["auto_branch_prefix"]
     if not branch.startswith(prefix) or len(branch) <= len(prefix):
         return False, f"只有 {prefix}<主题> 分支可以自动提交/推送，{branch} 需要你批准"
+    if atype == "git_commit" and repo_hooks(repo_dir) and not hooks_sandboxable():
+        return False, f"仓库配置了 git hooks（{', '.join(repo_hooks(repo_dir))}），这台机器上没法在沙箱里运行它们：要你批准后再提交"
     if atype == "git_commit":
         for p in payload.get("paths") or []:
             full = (repo_dir / str(p)).resolve()
@@ -202,7 +205,27 @@ def _check_commit_files(repo_dir: Path, paths: list[str]) -> list[str]:
     return files
 
 
-def commit(payload: dict) -> dict:
+HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit")
+DEP_DIRS = ("node_modules", ".venv", "venv")   # untracked dependency dirs hooks usually need (linked in, read-only)
+
+
+def repo_hooks(repo_dir: Path) -> list[str]:
+    """The commit hooks this repo would run (core.hooksPath honoured)."""
+    hp = git(repo_dir, "config", "--get", "core.hooksPath").stdout.strip()
+    if hp:
+        d = Path(os.path.expanduser(hp))
+        d = d if d.is_absolute() else repo_dir / d
+    else:
+        d = repo_dir / git(repo_dir, "rev-parse", "--git-path", "hooks").stdout.strip()
+    return [h for h in HOOKS if (d / h).is_file() and os.access(d / h, os.X_OK)]
+
+
+def hooks_sandboxable() -> bool:
+    from ..executors import sandbox
+    return sandbox.enabled()
+
+
+def commit(payload: dict, *, human_approved: bool = False) -> dict:
     """Commit exactly the listed paths (never `add -A` of the tree) in a repo under the user's work roots; with `branch`
     the commit goes on that branch, created from the current HEAD when it does not exist yet. The files that would be
     committed are checked against NEVER_COMMIT before anything (branch switch, staging) happens."""
@@ -223,6 +246,11 @@ def commit(payload: dict) -> dict:
         if not valid_branch(branch):
             raise RuntimeError(f"not a plain branch name: {branch}")
         if branch != current_branch(repo_dir):
+            hooks = repo_hooks(repo_dir)
+            if hooks:
+                if not hooks_sandboxable() and not human_approved:
+                    raise RuntimeError(f"repo has git hooks ({', '.join(hooks)}) that cannot run sandboxed here: needs approval")
+                return _commit_with_hooks(repo_dir, branch, files, message, sandboxed=hooks_sandboxable())
             return _commit_to_branch(repo_dir, branch, files, message)
     note = ""
     add = git(repo_dir, "add", "-A", "--", *paths, extra=_LIT)  # -A so deletions of the listed paths are staged too
@@ -310,6 +338,94 @@ def _commit_to_branch(repo_dir: Path, branch: str, files: list[str], message: st
     finally:
         index.unlink(missing_ok=True)
         Path(str(index) + ".lock").unlink(missing_ok=True)
+
+
+def _copy_into(src_root: Path, dst_root: Path, files: list[str]) -> None:
+    """Copy the listed working-tree entries into a fresh checkout without ever following a symlink of that checkout
+    (a branch can turn a directory into a link pointing anywhere)."""
+    real_root = os.path.realpath(dst_root)
+    for f in files:
+        src, dst = src_root / f, dst_root / f
+        parent = dst.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        if not (os.path.realpath(parent) + os.sep).startswith(real_root + os.sep):
+            raise RuntimeError(f"refusing to write through a symlink on the branch: {f}")
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        elif dst.exists():
+            raise RuntimeError(f"a directory is in the way on the branch: {f}")
+        if src.is_symlink():
+            os.symlink(os.readlink(src), dst)
+        elif src.is_file():
+            shutil.copy2(src, dst)
+
+
+def _commit_with_hooks(repo_dir: Path, branch: str, files: list[str], message: str, *, sandboxed: bool) -> dict:
+    """A normal `git commit` (so the repo's hooks run and may fix files) in a throw-away `clone --shared` of the repo, inside
+    the agent sandbox when `sandboxed`: only the clone is writable, network only through an egress proxy (package
+    registries etc.), no credentials. The resulting commit is fetched back and written to `branch` with a CAS update-ref."""
+    from ..executors import egress, proc, sandbox
+    ref = f"refs/heads/{branch}"
+    tip = git(repo_dir, "rev-parse", "--verify", "--quiet", ref).stdout.strip()
+    base = tip or git(repo_dir, "rev-parse", "--verify", "--quiet", "HEAD").stdout.strip()
+    if not base:
+        return {"done": False, "details": "仓库还没有任何提交，无法从 HEAD 新建分支"}
+    run_dir = load_config().path("var") / "tmp" / f"hooks-{uuid.uuid4().hex[:12]}"
+    work = run_dir / repo_dir.name
+    run_dir.mkdir(parents=True)
+    try:
+        c = git(run_dir, "clone", "--quiet", "--shared", "--no-checkout", "--", str(repo_dir), str(work))
+        if c.returncode != 0:
+            return {"done": False, "details": f"无法建立临时副本：{c.stderr[-400:]}"}
+        for key in ("user.name", "user.email", "core.hooksPath", "commit.gpgsign"):
+            v = git(repo_dir, "config", "--get", key).stdout.strip()
+            if v:
+                git(work, "config", key, v)
+        if not git(repo_dir, "config", "--get", "core.hooksPath").stdout.strip():
+            src_hooks = repo_dir / git(repo_dir, "rev-parse", "--git-path", "hooks").stdout.strip()
+            for h in HOOKS:
+                if (src_hooks / h).is_file():
+                    shutil.copy2(src_hooks / h, work / ".git" / "hooks" / h)
+        co = subprocess.run(["git", "-C", str(work), "checkout", "--quiet", "-B", branch, base], capture_output=True, text=True,
+                            timeout=600, env={**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}, **NO_WINDOW)
+        if co.returncode != 0:
+            return {"done": False, "details": f"无法检出 {branch}：{co.stderr[-400:]}"}
+        _copy_into(repo_dir, work, files)
+        for d in DEP_DIRS:   # the user's installed dependencies, readable but not writable inside the sandbox
+            if (repo_dir / d).is_dir() and not (work / d).exists():
+                os.symlink(repo_dir / d, work / d)
+        logs = run_dir / "logs"
+        logs.mkdir()
+        spec = type("S", (), {"allow_network": True, "net_allow": []})()
+        steps = [["git", "add", "-A", "--", *files], ["git", "commit", "--quiet", "-m", message]]
+        out: list[str] = []
+        with egress.EgressProxy(sandbox.allowed_domains(spec)) as px:
+            for argv in steps:
+                if sandboxed:
+                    argv, env = sandbox.wrap(argv, log_dir=logs, writable=[work], readable=[work], proxy=px)
+                else:
+                    env = {**sandbox.cache_env(logs / "tmp")}
+                env["PRE_COMMIT_HOME"] = str(logs / "tmp" / "cache" / "pre-commit")
+                pr = proc.run_process(argv, cwd=work, stdin_text=None, timeout_s=900, env=env, proxy=not sandboxed,
+                                      on_stdout=out.append, on_stderr=out.append)
+                if pr.exit_code != 0:
+                    tail = "\n".join(out)[-1200:] or pr.stderr_tail[-1200:]
+                    return {"done": False, "details": f"git hooks 没通过（{' '.join(argv[-4:])[:80]}），未提交：\n{tail}"}
+        sha = git(work, "rev-parse", "HEAD").stdout.strip()
+        if sha == base:
+            return {"done": True, "details": f"分支 {branch} 上这些文件已经是最新，没有新的提交", "commit": base[:12], "branch": branch}
+        f = git(repo_dir, "fetch", "--quiet", "--no-tags", "--", str(work), sha)
+        if f.returncode != 0:
+            return {"done": False, "details": f"无法取回提交：{f.stderr[-400:]}"}
+        u = git(repo_dir, "update-ref", "-m", f"awos: {message.splitlines()[0][:80]}", ref, sha, tip or "")
+        if u.returncode != 0:
+            return {"done": False, "details": f"分支 {branch} 在提交期间被改动，未写入：{u.stderr[-400:]}"}
+        mode = "在沙箱里" if sandboxed else "经你批准后"
+        return {"done": True, "commit": sha[:12], "branch": branch,
+                "details": f"（{mode}运行了仓库的 git hooks 后提交到分支 {branch}；你的分支、暂存区和工作区都没有被改动）\n"
+                           + "\n".join(out)[-800:]}
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def push(payload: dict) -> dict:

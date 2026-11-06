@@ -129,6 +129,11 @@ class CodexParser:
 
 
 KEEP_ENV = ("OPENAI_", "CODEX_", "AZURE_OPENAI_")  # credential-like env Codex itself may need; all others are scrubbed
+def sandbox_env(spec: RunSpec) -> dict[str, str]:
+    from . import sandbox
+    return sandbox.cache_env(spec.log_dir / "tmp")
+
+
 PROFILES_SINCE = (0, 167)  # permission profiles (filesystem deny / per-path grants) verified from this Codex version on
 
 
@@ -175,7 +180,8 @@ class CodexExecutor(Executor):
             return ["-s", mode]
         fs = sandbox.codex_filesystem(cwd=spec.cwd, log_dir=spec.log_dir, readable=list(spec.add_dirs), write=mode != "read-only")
         body = ", ".join(f"{json.dumps(k, ensure_ascii=False)} = {json.dumps(v)}" for k, v in fs.items())
-        return ["-c", f"permissions.awos.filesystem={{{body}}}", "-c", 'default_permissions="awos"']
+        return ["-c", f"permissions.awos.filesystem={{{body}}}", *sandbox.codex_network(sandbox.allowed_domains(spec)),
+                "-c", 'default_permissions="awos"']
 
     def run(self, spec: RunSpec, on_event: EventSink, cancel: threading.Event) -> RunResult:
         (spec.log_dir / "tmp").mkdir(parents=True, exist_ok=True)
@@ -187,7 +193,7 @@ class CodexExecutor(Executor):
         prompt = spec.prompt if not spec.system_prompt else f"{spec.system_prompt}\n\n{spec.prompt}"
         parser = CodexParser(on_event)
         pr = run_process(self.build_argv(spec, schema_path), cwd=spec.cwd, stdin_text=prompt, timeout_s=spec.timeout_s,
-                         cancel=cancel, log_dir=spec.log_dir, env={**(spec.env or {}), "TMPDIR": str(spec.log_dir / "tmp") + os.sep},
+                         cancel=cancel, log_dir=spec.log_dir, env={**sandbox_env(spec), **(spec.env or {})},
                          on_stdout=parser.feed, on_pid=spec.on_pid, keep_secrets=KEEP_ENV)
         last_file = spec.log_dir / "last_message.txt"
         final = last_file.read_text(encoding="utf-8", errors="replace") if last_file.exists() else parser.last_message

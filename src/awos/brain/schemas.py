@@ -109,7 +109,7 @@ EXECUTE_SCHEMA: dict = {
                 "type": "object",
                 "properties": {
                     "type": {"type": "string", "enum": ["send_email", "post_message", "publish", "git_push", "git_commit", "open_mr", "apply_to_project",
-                                                        "calendar_write", "notion_write", "delete", "spend", "submit_form", "other"]},
+                                                        "calendar_write", "notion_write", "delete", "spend", "submit_form", "grant_network", "other"]},
                     "title": {"type": "string"},
                     "description": {"type": "string"},
                     "risk": {"type": "string", "enum": ["low", "medium", "high"]},

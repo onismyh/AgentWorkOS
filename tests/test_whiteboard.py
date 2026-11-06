@@ -343,3 +343,84 @@ def test_subtasks_and_capped_tasks_inherit_sensitivity(git_env):
     repo.update_task(capped["id"], level_cap=2)
     ok, why = gitops.auto_allowed("git_commit", payload, task=repo.get_task(capped["id"]))
     assert not ok and "L2" in why
+
+
+# --------------------------------------------------------------------------- git hooks for agent commits
+
+
+def _hook(repo: Path, name: str, body: str) -> None:
+    h = repo / ".git" / "hooks" / name
+    h.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    h.chmod(0o755)
+
+
+def test_agent_commit_runs_the_repos_hooks_in_a_sandboxed_clone(git_env, tmp_path):
+    import sys
+    from awos.hitl import gitops
+    r, _, main = _repo_with_remote(git_env)
+    escape = tmp_path / "escaped.txt"
+    # the hook formats the file (its change must land in the commit) and tries to write outside the clone
+    _hook(r, "pre-commit", f'printf "formatted\\n" > a.txt && git add a.txt; echo hook-ran; echo x > {escape} 2>/dev/null || echo outside-blocked')
+    _hook(r, "commit-msg", 'grep -q "^feat" "$1" || { echo "message must start with feat"; exit 1; }')
+    (r / "a.txt").write_text("messy", encoding="utf-8")
+    bad = gitops.commit({"repo": str(r), "branch": "agent/h", "paths": ["a.txt"], "message": "oops"})
+    assert not bad["done"] and "feat" in bad["details"] and _sh(r, "branch", "--list", "agent/h") == ""
+    ok = gitops.commit({"repo": str(r), "branch": "agent/h", "paths": ["a.txt"], "message": "feat: a"})
+    assert ok["done"], ok
+    assert _sh(r, "show", "agent/h:a.txt") == "formatted" and "hook-ran" in ok["details"]
+    assert _sh(r, "rev-parse", "--abbrev-ref", "HEAD") == main and (r / "a.txt").read_text() == "messy"   # user's tree untouched
+    if sys.platform == "darwin":
+        assert not escape.exists() and "outside-blocked" in ok["details"]
+    assert not list((git_env["tmp"] / "var" / "tmp").glob("hooks-*")) if (git_env["tmp"] / "var" / "tmp").exists() else True
+
+
+def test_hooks_without_a_sandbox_need_the_human(git_env, monkeypatch):
+    from awos import repo as db
+    from awos.hitl import gitops
+    r, _, _ = _repo_with_remote(git_env)
+    _hook(r, "pre-commit", "exit 0")
+    (r / "a.txt").write_text("9", encoding="utf-8")
+    monkeypatch.setattr(gitops, "hooks_sandboxable", lambda: False)
+    (aid,) = _proposed("git_commit", {"repo": str(r), "branch": "agent/n", "paths": ["a.txt"], "message": "m"})
+    a = db.get_approval(aid)
+    assert a["status"] == "pending" and "git hooks" in a["context_md"]
+    done = _approve_action("git_commit", {"repo": str(r), "branch": "agent/n", "paths": ["a.txt"], "message": "m"})
+    assert done["status"] == "executed" and "经你批准后" in done["result"]["details"]
+
+
+# --------------------------------------------------------------------------- network: human in the loop
+
+
+def test_grant_network_is_proposed_approved_and_rerun_with_the_domains(git_env):
+    from awos import repo as db
+    from awos.engine.actions import decide
+    from awos.hitl import outbox
+    task = _task_with(level=3)
+    db.set_task_status(task["id"], "waiting_approval", "t", force=True)
+    out = {"proposed_actions": [{"type": "grant_network", "title": "需要访问 example.org", "description": "下载数据",
+                                 "risk": "low", "payload_json": json.dumps({"domains": ["example.org"], "reason": "数据集"})}]}
+    (aid,) = outbox.create_from_result(task, "run_n", out)
+    a = db.get_approval(aid)
+    assert a["status"] == "pending" and a["risk"] == "medium" and "example.org" in a["context_md"]
+    decide(aid, "approve", via="test")
+    import time
+    for _ in range(100):                                                              # actions run on their own thread
+        if db.get_approval(aid)["status"] not in ("approved", "executing"):
+            break
+        time.sleep(0.05)
+    t = db.get_task(task["id"])
+    assert db.get_approval(aid)["status"] == "executed" and t["meta"]["network_allow"] == ["example.org"]
+    assert t["status"] == "ready"                                                     # re-runs with the new domain
+
+
+def test_blocked_domains_become_a_suggestion_when_the_agent_did_not_ask(git_env):
+    from awos import repo as db
+    from awos.hitl import outbox
+    task = _task_with(level=3)
+    db.add_run_event("run_d", "network_denied", None, {"hosts": ["files.example.net", "127.0.0.1:8765", "files.example.net"]})
+    ids = outbox.create_from_result(task, "run_d", {"proposed_actions": []})
+    (a,) = [db.get_approval(i) for i in ids]
+    assert a["action_type"] == "grant_network" and a["payload"]["domains"] == ["files.example.net"]
+    assert "系统观察到" in a["context_md"]
+    assert outbox.create_from_result(task, "run_d", {"proposed_actions": [{"type": "grant_network", "title": "x", "description": "",
+                                                                          "payload_json": json.dumps({"domains": ["a.example.net"]})}]})

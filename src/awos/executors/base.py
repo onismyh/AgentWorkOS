@@ -25,7 +25,8 @@ class RunSpec:
     timeout_s: int = 1200
     model: str | None = None
     add_dirs: list[Path] = field(default_factory=list)   # extra dirs the agent may READ (and write if sandbox allows)
-    allow_network: bool = True                  # web search / fetch allowed
+    allow_network: bool = True                  # web search / fetch, and shell access to the allowed domains
+    net_allow: list[str] = field(default_factory=list)    # extra domains the user approved for this task (grant_network)
     allow_connectors: bool = False              # codex apps (gmail/notion/drive...) allowed in this run
     max_budget_usd: float | None = None
     env: dict[str, str] | None = None

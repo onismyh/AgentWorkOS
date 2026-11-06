@@ -94,29 +94,54 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 
 ### 2.3 Agent 沙箱（最小权限）
 
-每个 agent 进程只拿到这次任务需要的权限（`src/awos/executors/sandbox.py`，`[sandbox]` 配置段）。macOS 不允许 Seatbelt 嵌套，所以能把自带沙箱配严的 agent 用它自己的，其余的由 AgentWorkOS 套一层 `sandbox-exec`。四个执行器在 macOS 上都实测过：往工作区外写、读凭据、读 `var/api_token`、连本机 API 全部被拦。
+原则：默认只给完成任务通常需要的权限，越过边界时不是失败，而是**请你批准**（human in the loop）。配置在 `[sandbox]`，实现在 `src/awos/executors/sandbox.py`、`egress.py`。
 
-| | 写 | 读 | 网络 |
-|---|---|---|---|
-| 所有执行器 | 只能写本次任务的工作区（只读任务不能写；Claude 的只读任务仍可写自己的草稿工作区）和私有临时目录 | 不能读凭据（`~/.ssh`、`~/.aws`、各 agent 的登录文件、`var/secrets.toml` 等）、AgentWorkOS 的数据（`var/`：数据库里的全部邮件、其他任务的工作区、运行日志、API token）和其他 agent 的历史（`~/.codex`、`~/.claude`、`~/.dsh`、`~/.pi`、邮件/信息）；本次任务的工作区和可读目录除外 | 见下 |
-| claude | Claude Code 自带沙箱：Bash 受上述限制，没有"不走沙箱"的后门（`allowUnsandboxedCommands=false`，沙箱起不来就失败）；Read/Edit 工具对凭据和 `var/` 里最敏感的文件（API token、数据库、日志、备份）另有拒绝规则 | | Bash 不能联网 |
-| codex | Codex 权限配置（`permissions.awos` + `default_permissions`），实测优先于用户配置里的 `sandbox_mode`；Codex 低于 0.167 时退回 `-s read-only/workspace-write` | | 命令不能联网 |
-| dsh | 整个进程套 Seatbelt；`runtime/dsh-home` 里只有数据目录（sessions、storages、cache、attachments 等）可写，配置层、`AGENTS.md`、skills、`.env` 都只读，防止一次运行给下一次埋东西 | 自己的账号登录文件可读 | 不能连本机（127.0.0.1/::1），所以拿不到控制台的 token；不能连 ssh-agent、docker 等 unix socket（DNS 除外）；不传代理，直连 DeepSeek |
-| pi | 整个进程套 Seatbelt；只能写 `runtime/pi-home` 里的 `tmp/` 和两个缓存文件。工具目录 `bin/`（rg、fd 由 `awos setup` 预先下载）、设置、MCP 配置、扩展都只读；永远不用你自己的 `~/.pi/agent` | 自己的登录文件（如有，以链接方式接入）可读写 | 同 dsh |
+**默认能做的**
 
-另外：
-- 套 Seatbelt 的 agent 不能发 AppleEvents、不能调 LaunchServices，所以 `osascript`、`open` 起不了沙箱外的程序。
-- 所有执行器的环境变量都会去掉看起来像凭据的变量：`*TOKEN*`、`*KEY*`、`*SECRET*`、带密码的 URL、`SSH_AUTH_SOCK`、`GH_TOKEN` 等。每个执行器只保留自己登录要用的前缀：claude 是 `ANTHROPIC_`、`CLAUDE_CODE_`，只有配置了 Bedrock/Vertex 时才加上 `AWS_` 或 `GOOGLE_`；codex 是 `OPENAI_`、`CODEX_`。
-- `sandbox.deny_read` 可以再加禁止读取的路径。
-- Windows/Linux 上：codex、dsh 用各自的原生沙箱；claude 在 Linux 上有 bubblewrap 时才开沙箱。
+- 在本次任务的工作区里读写（只读任务不能写），装依赖：`npm/pip/uv/cargo/go` 的缓存放在本次运行的私有临时目录里，不写 `~/.npm`、`~/.cache`。
+- 命令行联网到常用的包仓库和代码托管站点：pypi、npm、GitHub、GitLab、Gitee、crates、Go proxy、conda、CTAN、Hugging Face 和常见国内镜像。列表见 `DEFAULT_DOMAINS`，可以用 `sandbox.allowed_domains` 改。本机设了系统代理时自动经它出去。
+- 读用户的项目目录和可读目录。
+
+**一律拦下的**
+
+- 写工作区以外的地方。
+- 读凭据（`~/.ssh`、`~/.aws`、各 agent 的登录文件、`var/secrets.toml` 等）。
+- 读 AgentWorkOS 的数据：`var/` 里有数据库里的全部邮件、其他任务的工作区、运行日志、API token。
+- 读其他 agent 的历史（`~/.codex`、`~/.claude`、`~/.dsh`、`~/.pi`）和邮件/信息。
+- 访问本机和局域网（控制台 API、ssh-agent、docker 等 unix socket）。
+- 访问名单以外的域名。
+- 用 `osascript`、`open` 启动沙箱外的程序。
+
+**需要更多权限时（human in the loop）**
+
+- 网络：agent 在 `proposed_actions` 里提议 `grant_network`（要哪些域名、为什么）。pi、dsh 的出站全部经过 AgentWorkOS 的过滤代理，它被拦下的域名系统会记下来，agent 没主动申请时也会自动生成一条"放行网络"的审批。你批准后只对这个任务放行，任务带着这些域名自动重跑。
+- 写你的项目：照旧走 `apply_to_project` 审批。
+- 提交代码：见 §2.4。
+
+**各执行器怎么落实**（macOS 不允许 Seatbelt 嵌套，能配严的用它自己的沙箱，其余的套 AgentWorkOS 的 `sandbox-exec`）
+
+| | 文件 | 网络 |
+|---|---|---|
+| claude | Claude Code 自带沙箱，没有"不走沙箱"的后门（`allowUnsandboxedCommands=false`）；Read/Edit 对凭据和 `var/` 敏感文件另有拒绝规则 | 沙箱的 `allowedDomains`，Claude 自己的代理执行，会告诉 agent 哪个域名被拦了 |
+| codex | Codex 权限配置（`permissions.awos`），实测优先于用户配置里的 `sandbox_mode`；低于 0.167 退回 `-s` | Codex 自带的 network proxy + 域名名单 |
+| dsh | 整个进程套 Seatbelt；`runtime/dsh-home` 只有数据目录可写，配置层、`AGENTS.md`、skills、`.env` 只读 | 只能连本次运行的过滤代理（DeepSeek API + 名单，拒绝内网地址），被拦的域名会记下来 |
+| pi | 整个进程套 Seatbelt；`runtime/pi-home` 只有 `tmp/` 和两个缓存文件可写，工具（rg、fd 由 setup 预装）、设置、MCP 配置、扩展只读 | 同 dsh |
+
+四个执行器在 macOS 上都实测过：在工作区里 `npm install` 成功；访问 example.com、读 `~/.ssh` 里的探针文件、写工作区外、读 `var/api_token`、连本机服务器都被拦下。
+
+所有执行器的环境变量都会去掉看起来像凭据的变量，只保留各自登录要用的前缀。Windows/Linux 上 codex、dsh 用各自的原生沙箱，claude 在 Linux 上有 bubblewrap 时才开沙箱。
 
 ### 2.4 Git：agent 分支
 
 - 只有 `agent/<主题>` 分支上的 `git_commit` / `git_push` 不需要批准（`config/policy.toml [git]`）。提交用 git 底层命令直接写到分支上（私有 index → `commit-tree` → 带旧值校验的 `update-ref`），不检出任何东西，所以：
   - 你当前的分支、暂存区和工作区都不会被切换或改动；
   - 分支里的符号链接不会把文件写到仓库外；
-  - 不跑 hooks；
   - 两个提交同时写同一个分支时，后一个会失败而不是把前一个覆盖掉。
+- 仓库配置了 git hooks（pre-commit、commit-msg 等，含 `core.hooksPath`/husky）时，hooks 照常运行：
+  - 系统在 `var/tmp` 里建一个临时副本（`clone --shared`），在沙箱里正常 `git commit`。hooks 能格式化文件，改动会进提交；不通过就不提交，并把输出写进审批结果。
+  - 沙箱里只有这个副本可写；你装好的 `node_modules`、`.venv` 以只读方式接进去；联网走同样的域名名单。
+  - 提交取回到你的仓库，用带旧值校验的方式写入分支。
+  - 没有沙箱的平台上，这类提交要你批准后才运行 hooks。
 - 其他分支、main/master 和远端默认分支、MR/PR 都要批准。
 - 敏感任务的 git 动作一律要批准，判断时会沿着上级任务一路往上查，所以拆出来的子任务也算：
   - 实际层级（按类别上限算）是 L1/L2 或只读沙箱的任务；

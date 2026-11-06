@@ -276,6 +276,7 @@ def _process(task: dict, owner: str) -> None:
         run_id, res = run_agent(run_prompt, purpose="execute", executor=executor, task_id=task["id"], attempt=task["attempts"],
                                 cwd=workspace, sandbox=dec.sandbox, output_schema=EXECUTE_SCHEMA,
                                 add_dirs=dec.readable + extra_dirs, allow_network=True, allow_connectors=False,
+                                net_allow=list((repo.get_task(task["id"]) or task).get("meta", {}).get("network_allow") or []),
                                 max_budget_usd=max(0.1, min(remaining, run_cap)))
         if res.status == "succeeded" and res.structured:
             break

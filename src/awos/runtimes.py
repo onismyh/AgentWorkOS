@@ -139,9 +139,29 @@ def pi_login_dir() -> Path | None:
     return d if a.is_file() and a.stat().st_size > 2 else None
 
 
-def discover(secrets: dict) -> Found:
+_SK = re.compile(r"\bsk-[A-Za-z0-9]{16,}\b")
+SETUP_MARK = "# added by `awos setup`"
+
+
+def read_key_file(path: str | Path) -> str | None:
+    """The DeepSeek API key (`sk-...`) in a text file; None if there is none."""
+    try:
+        m = _SK.search(Path(os.path.expanduser(str(path))).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return m.group(0) if m else None
+
+
+def discover(secrets: dict, deepseek_key: str | None = None) -> Found:
+    """`deepseek_key` (from --deepseek-key-file) or DEEPSEEK_API_KEY wins over an account login, and also replaces a
+    [pi] / [dsh] section that setup wrote earlier without an API key (sections the user wrote are never touched)."""
     f = Found()
-    deepseek = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    deepseek = (deepseek_key or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    for name in ("pi", "dsh"):
+        if deepseek and secrets.get(name) and not (secrets[name].get("env") or {}).get("DEEPSEEK_API_KEY") \
+                and secrets[name].get("_by_setup"):
+            secrets = {k: v for k, v in secrets.items() if k != name}
+            f.sections[f"_replace_{name}"] = {}
 
     if codex_logged_in():
         f.lines.append("codex: logged in (~/.codex/auth.json) - shared with the Codex app/CLI")
@@ -155,7 +175,7 @@ def discover(secrets: dict) -> Found:
         f.lines.append("dsh: var/secrets.toml [dsh] already configured - kept")
     elif deepseek:
         f.sections["dsh"] = {"env": {"DEEPSEEK_API_KEY": deepseek}}
-        f.lines.append(f"dsh: DEEPSEEK_API_KEY from the environment ({_mask(deepseek)})")
+        f.lines.append(f"dsh: DeepSeek API key ({_mask(deepseek)})")
     elif (cred := dsh_account_credentials()) is not None:
         f.sections["dsh"] = {"provider": "deepseek-account", "model": "deepseek-flash", "credentials": str(cred)}
         f.lines.append(f"dsh: DeepSeek account login found ({cred}) - used by reference, not copied")
@@ -166,7 +186,7 @@ def discover(secrets: dict) -> Found:
         f.lines.append("pi: var/secrets.toml [pi] already configured - kept")
     elif deepseek:
         f.sections["pi"] = {"env": {"DEEPSEEK_API_KEY": deepseek}}
-        f.lines.append(f"pi: DEEPSEEK_API_KEY from the environment ({_mask(deepseek)})")
+        f.lines.append(f"pi: DeepSeek API key ({_mask(deepseek)})")
     elif (d := pi_login_dir()) is not None:
         f.sections["pi"] = {"credentials": str(d / "auth.json")}
         f.lines.append(f"pi: existing Pi login found ({d / 'auth.json'}) - linked, the rest of ~/.pi stays private")
@@ -181,16 +201,47 @@ def _toml_value(v) -> str:
     return json.dumps(str(v), ensure_ascii=False)  # JSON string escapes are valid TOML basic-string escapes
 
 
+def setup_written(path: Path) -> set[str]:
+    """Sections of secrets.toml that `awos setup` wrote (header carries SETUP_MARK)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    return set(re.findall(r"^\[([A-Za-z0-9_.-]+)\]\s*" + re.escape(SETUP_MARK), text, re.M))
+
+
+def _drop_setup_sections(path: Path, names: set[str]) -> None:
+    """Remove [name] tables that setup wrote (up to the next table header)."""
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    out, skipping = [], False
+    for line in lines:
+        m = re.match(r"^\[([A-Za-z0-9_.-]+)\]", line)
+        if m:
+            skipping = m.group(1) in names and SETUP_MARK in line
+        if not skipping:
+            out.append(line)
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("".join(out))
+    os.replace(tmp, path)
+
+
 def append_sections(path: Path, sections: dict[str, dict]) -> list[str]:
-    """Append new [section] tables to secrets.toml (never edits existing ones). Returns the names written."""
+    """Append new [section] tables to secrets.toml. Existing tables are never edited, except ones setup wrote itself
+    when `_replace_<name>` asks for it (an API key replacing an account login). Returns the names written."""
     try:
         existing = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise RuntimeError(f"{path} is not valid TOML ({e}); fix it and re-run setup") from None
+    replace = {k[len("_replace_"):] for k in sections if k.startswith("_replace_")} & setup_written(path) & set(sections)
+    if replace:
+        _drop_setup_sections(path, replace)
+        existing = {k: v for k, v in existing.items() if k not in replace}
     new = {k: v for k, v in sections.items() if not k.startswith("_") and k not in existing}
     if not new:
         return []
-    text = "".join(f"\n[{name}]  # added by `awos setup`\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in body.items())
+    text = "".join(f"\n[{name}]  {SETUP_MARK}\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in body.items())
                    for name, body in new.items())
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -257,7 +308,8 @@ def init_dsh_profile(log=print) -> None:
     log(f"    dsh: headless profile {'created' if cp.returncode == 0 else 'not created: ' + cp.stderr[-300:]}")
 
 
-def setup(*, install: bool = True, credentials: bool = True, only: list[str] | None = None, log=print) -> int:
+def setup(*, install: bool = True, credentials: bool = True, only: list[str] | None = None, deepseek_key_file: str | None = None,
+          log=print) -> int:
     ok = True
     if install:
         log("==> agent runtimes (runtime/)")
@@ -272,7 +324,15 @@ def setup(*, install: bool = True, credentials: bool = True, only: list[str] | N
         log("==> credentials")
         cfg = load_config()
         path = cfg.path("var") / "secrets.toml"
-        found = discover(cfg.secrets())
+        key = None
+        if deepseek_key_file:
+            key = read_key_file(deepseek_key_file)
+            log(f"    deepseek key file {deepseek_key_file}: {'found (' + _mask(key) + ')' if key else 'no sk-... key in it'}")
+        secrets = cfg.secrets()
+        for name in setup_written(path):
+            if isinstance(secrets.get(name), dict):
+                secrets[name] = {**secrets[name], "_by_setup": True}
+        found = discover(secrets, key)
         for line in found.lines:
             log(f"    {line}")
         written = append_sections(path, found.sections)

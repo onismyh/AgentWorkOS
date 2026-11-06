@@ -23,6 +23,7 @@ the executor needs for its own login.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -80,6 +81,39 @@ def _filters(paths: list[str], files: list[str] = ()) -> str:
 
 
 MDNS_SOCKET = "/private/var/run/mDNSResponder"   # DNS lookups go through this socket; every other unix socket is denied
+# Shell commands may reach these by default (package registries, code hosting, common mirrors), so installing
+# dependencies and cloning sources just works; anything else needs the user's OK (outbox `grant_network`).
+DEFAULT_DOMAINS = (
+    "pypi.org", "files.pythonhosted.org", "pypi.tuna.tsinghua.edu.cn", "mirrors.aliyun.com",
+    "registry.npmjs.org", "registry.yarnpkg.com", "registry.npmmirror.com", "nodejs.org",
+    "github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com",
+    "release-assets.githubusercontent.com", "gitlab.com", "gitee.com",
+    "crates.io", "index.crates.io", "static.crates.io", "proxy.golang.org", "sum.golang.org",
+    "repo.anaconda.com", "conda.anaconda.org", "mirrors.ctan.org", "huggingface.co", "cdn-lfs.huggingface.co",
+)
+# What each confined agent's own process needs (its model API), whatever the task's network setting.
+AGENT_DOMAINS = {"pi": ("api.deepseek.com",), "dsh": ("api.deepseek.com", "platform.deepseek.com")}
+
+
+def allowed_domains(spec) -> list[str]:
+    """Domains a run's shell commands may reach: none for offline runs, else the defaults (`sandbox.allowed_domains`
+    replaces them) plus what the user approved for this task."""
+    from .egress import valid_domain
+    if not spec.allow_network:
+        return []
+    base = load_config().get("sandbox.allowed_domains")
+    doms = [*(base if base is not None else DEFAULT_DOMAINS), *(spec.net_allow or [])]
+    return sorted({d.lower() for d in doms if valid_domain(d)})
+
+
+def cache_env(tmp: Path) -> dict[str, str]:
+    """Package-manager caches inside the run's private TMPDIR: installs work without write access to ~/.npm, ~/.cache,
+    ~/go ..., and nothing one run downloads is reused by another."""
+    c = tmp / "cache"
+    return {"TMPDIR": str(tmp) + os.sep, "XDG_CACHE_HOME": str(c), "npm_config_cache": str(c / "npm"),
+            "PIP_CACHE_DIR": str(c / "pip"), "UV_CACHE_DIR": str(c / "uv"), "YARN_CACHE_FOLDER": str(c / "yarn"),
+            "GOPATH": str(c / "go"), "GOMODCACHE": str(c / "go" / "mod"), "CARGO_HOME": str(c / "cargo"),
+            "npm_config_update_notifier": "false"}
 
 
 def _inside_private(paths: list[str]) -> list[str]:
@@ -89,14 +123,15 @@ def _inside_private(paths: list[str]) -> list[str]:
 
 
 def seatbelt_profile(*, writable: list[Path], readable: list[Path], writable_files: list[Path] = (),
-                     readonly_within: list[Path] = (), own_files: list[Path] = ()) -> str:
+                     readonly_within: list[Path] = (), own_files: list[Path] = (), proxy_port: int | None = None) -> str:
     """The `sandbox-exec` profile for agents without a usable sandbox of their own. Seatbelt applies the last matching
     rule, so each narrower allow/deny comes after the broader one it refines:
       writes: nowhere, except /dev and `writable` dirs minus `readonly_within` (an agent's own code / config inside its
               state dir, so a run cannot plant something the next run would load), plus single `writable_files`
       reads:  not AgentWorkOS's data / other agents' histories, except `readable` (+ the writable ones)
               never credentials, except `own_files` (the agent's own login, read/write for token refresh)
-      no localhost and no unix sockets (ssh-agent, docker, ...) except DNS, no AppleEvents, no LaunchServices."""
+      network: nothing but the run's egress proxy on `proxy_port` (domain allowlist there) and DNS; so no localhost,
+              no LAN, no unix sockets (ssh-agent, docker, ...); no AppleEvents, no LaunchServices."""
     w_dirs = _uniq(writable)
     w_files = _uniq(writable_files)
     lines = ["(version 1)", "(allow default)", "(deny file-write*)",
@@ -119,8 +154,9 @@ def seatbelt_profile(*, writable: list[Path], readable: list[Path], writable_fil
         parents = _uniq(q for p in own for q in Path(p).parents if str(q).startswith(home + os.sep))
         if parents:
             lines.append(f"(allow file-read-metadata {_filters([], parents)})")
-    lines.append('(deny network-outbound (remote ip "localhost:*"))')
-    lines.append("(deny network-outbound (remote unix-socket))")
+    lines.append("(deny network-outbound)")
+    if proxy_port:
+        lines.append(f'(allow network-outbound (remote ip "localhost:{int(proxy_port)}"))')
     lines.append(f'(allow network-outbound (remote unix-socket (path-literal "{MDNS_SOCKET}")))')
     lines.append("(deny appleevent-send)")
     lines.append("(deny mach-lookup " + " ".join(f'(global-name "{n}")' for n in LAUNCH_SERVICES) + ")")
@@ -128,25 +164,31 @@ def seatbelt_profile(*, writable: list[Path], readable: list[Path], writable_fil
 
 
 def wrap(argv: list[str], *, log_dir: Path, writable: list[Path], readable: list[Path] = (), writable_files: list[Path] = (),
-         readonly_within: list[Path] = (), own_files: list[Path] = ()) -> tuple[list[str], dict[str, str]]:
-    """argv run under sandbox-exec (macOS) with a per-run private TMPDIR; returns (argv, extra env). No-op elsewhere."""
-    if not enabled():
-        return argv, {}
-    if not Path(SANDBOX_EXEC).exists():
-        raise RuntimeError("sandbox-exec not found: refusing to run the agent unconfined")
+         readonly_within: list[Path] = (), own_files: list[Path] = (), proxy=None) -> tuple[list[str], dict[str, str]]:
+    """argv run under sandbox-exec (macOS) with a private TMPDIR / package caches and, when `proxy` (an EgressProxy) is
+    given, network only through it; returns (argv, extra env). Off macOS: argv unchanged, caches + proxy env only."""
     tmp = log_dir / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
+    extra = {**cache_env(tmp), **(proxy.env() if proxy else {})}
+    if not enabled():
+        return argv, extra
+    if not Path(SANDBOX_EXEC).exists():
+        raise RuntimeError("sandbox-exec not found: refusing to run the agent unconfined")
     profile = log_dir / "sandbox.sb"
     profile.write_text(seatbelt_profile(writable=[*writable, tmp], readable=[*readable, log_dir], writable_files=writable_files,
-                                        readonly_within=readonly_within, own_files=own_files), encoding="utf-8")
-    return [SANDBOX_EXEC, "-f", str(profile), *argv], {"TMPDIR": str(tmp) + os.sep}
+                                        readonly_within=readonly_within, own_files=own_files,
+                                        proxy_port=proxy.port if proxy else None), encoding="utf-8")
+    return [SANDBOX_EXEC, "-f", str(profile), *argv], extra
 
 
-def claude_settings(*, cwd: Path, read_only_dirs: list[Path]) -> dict:
+def claude_sandboxed() -> bool:
+    """Claude Code's own sandbox can run here (macOS Seatbelt, Linux bubblewrap) and is not switched off."""
+    return bool(load_config().get("sandbox.enabled", True)) and (IS_MAC or (os.name == "posix" and bool(shutil.which("bwrap"))))
+
+
+def claude_settings(*, cwd: Path, read_only_dirs: list[Path], log_dir: Path | None = None, domains: list[str] = ()) -> dict:
     """`sandbox` block for Claude Code's --settings (macOS Seatbelt / Linux bubblewrap); {} where it cannot run."""
-    if not load_config().get("sandbox.enabled", True):
-        return {}
-    if not (IS_MAC or (os.name == "posix" and shutil.which("bwrap"))):
+    if not claude_sandboxed():
         return {}
     keep_ro = [_real(p) for p in read_only_dirs if _real(p) != _real(cwd)]
     back = _inside_private(_uniq([cwd, *read_only_dirs]))
@@ -157,9 +199,18 @@ def claude_settings(*, cwd: Path, read_only_dirs: list[Path]) -> dict:
         "autoAllowBashIfSandboxed": False,    # which commands may run is still decided by --allowedTools
         "filesystem": {"denyRead": [*private_paths(), *secret_paths()],
                        "allowRead": back,   # back inside var/: this run's workspace + readable roots (allowRead beats denyRead)
-                       "denyWrite": keep_ro},
-        "network": {"allowedDomains": []},    # shell commands get no network (web access goes through WebFetch rules)
+                       "denyWrite": keep_ro,
+                       "allowWrite": [_real(log_dir / "tmp")] if log_dir else []},   # private TMPDIR + package caches
+        "network": {"allowedDomains": list(domains)},   # shell commands: only these (Claude Code's own proxy enforces it)
     }}
+
+
+def codex_network(domains: list[str]) -> list[str]:
+    """Codex config for its commands' network: off, or only `domains` through Codex's own network proxy."""
+    if not domains:
+        return []
+    body = ", ".join(f'{json.dumps(d)} = "allow"' for d in domains)
+    return ["-c", "features.network_proxy.enabled=true", "-c", f"permissions.awos.network={{enabled = true, domains = {{{body}}}}}"]
 
 
 def codex_filesystem(*, cwd: Path, log_dir: Path, readable: list[Path], write: bool) -> dict[str, str]:
