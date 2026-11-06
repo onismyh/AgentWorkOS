@@ -50,6 +50,9 @@ def context_brief(max_chars: int = 3500) -> str:
         lines.append("### 用户对任务的反馈（强信号：用户说不用管/已处理的主题，不要再建同类任务）")
         for f in sorted(feedback, key=lambda x: x["updated_at"], reverse=True)[:20]:
             lines.append(f"- {f['value']}")
+    archived = [f["key"] for f in repo.list_facts(kind="project", status="archived")]
+    if archived:
+        lines += ["### 已归档项目（用户确认不用再关注：不要为它们创建任务、提醒或简报）", "、".join(archived[:20])]
     for kind in KIND_ORDER:
         items = by_kind.get(kind) or []
         if not items:

@@ -7,7 +7,7 @@ from typing import Any
 
 from .. import repo
 from ..db import utcnow
-from ..models import TaskStatus
+from ..models import TERMINAL, TaskStatus
 
 
 def add_manual_task(title: str, description: str | None = None, *, level: int | None = None, category: str | None = None,
@@ -63,6 +63,38 @@ def complete_task(task_id: str, actor: str = "user", note: str | None = None) ->
     on_task_finished(task_id)
 
 
+ARCHIVE_REASON = "项目已归档"
+
+
+def archive_project(key: str, *, close_open: bool = False, actor: str = "user") -> dict:
+    """The user does not want to watch this project any more: it leaves the board, the guardian and the agents' prompts (they are
+    told not to create tasks for it). `close_open` also dismisses the project's open tasks (and withdraws their approvals), using the
+    same task -> project attribution the board shows. Restorable."""
+    from ..api.timeline import Dataset
+    from ..brain.projects import canonical_projects
+    fact = next((f for f in canonical_projects() if f["key"] == key), None)
+    if fact is None:
+        raise KeyError(f"project {key}")
+    closed = 0
+    if close_open:
+        for t in Dataset().project_tasks(key):
+            if TaskStatus(t["status"]) not in TERMINAL:
+                dismiss_task(t["id"], actor=actor, reason=ARCHIVE_REASON)
+                closed += 1
+    repo.set_fact_status(fact["id"], "archived")
+    repo.log_event("context", fact["id"], "archived", {"key": key, "closed": closed}, actor=actor)
+    return {"ok": True, "key": key, "closed": closed}
+
+
+def restore_project(key: str, *, actor: str = "user") -> dict:
+    fact = next((f for f in repo.list_facts(kind="project", status="archived") if f["key"] == key), None)
+    if fact is None:
+        raise KeyError(f"archived project {key}")
+    repo.set_fact_status(fact["id"], "active")
+    repo.log_event("context", fact["id"], "restored", {"key": key}, actor=actor)
+    return {"ok": True, "key": key}
+
+
 def cancel_task_runs(task_id: str) -> int:
     """Signal cancel to queued and running runs of a task (queued ones abort before starting)."""
     from ..llm import cancel_run
@@ -103,7 +135,7 @@ def learn_from_feedback(task_id: str, action: str, reason: str | None, actor: st
     """The human's reason for cancelling/dismissing is the strongest preference signal there is: keep it as a
     pinned context fact so triage stops re-suggesting the same thing and the context refresh can generalize it."""
     reason = (reason or "").strip()
-    if actor != "user" or len(reason) < 2 or reason in ("dismissed", "cancelled by user", "parent cancelled"):
+    if actor != "user" or len(reason) < 2 or reason in ("dismissed", "cancelled by user", "parent cancelled", ARCHIVE_REASON):
         return
     t = repo.get_task(task_id) or {}
     title = (t.get("title") or task_id)[:60]

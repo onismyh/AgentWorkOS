@@ -109,6 +109,12 @@ write = ["claude", "codex", "dsh"]
 codex = ["dev", "data", "system", "research"]
 claude = ["writing", "doc", "comms", "career", "pm", "schedule", "admin"]
 
+[guardian]
+# Once a day (Beijing time, from this hour) every project's health is checked; a project that is at risk or stalled gets one
+# read-only analysis task (what is it stuck on, what is the smallest next step). At most 3 per day, a week of quiet per project.
+enabled = true
+hour = 11
+
 [budget]
 daily_usd = 15.0                       # pay-per-use executors (claude, pi, dsh share it); hard stop when exceeded. Raised from 8 on the user's request
 per_task_usd = 5.0                     # was 3

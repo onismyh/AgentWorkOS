@@ -502,8 +502,8 @@ def upsert_fact(kind: str, key: str, value: str, *, source: str | None = None, c
         row = c.execute("SELECT * FROM context_facts WHERE kind = ? AND key = ?", (kind, key)).fetchone()
         existing = dict(row) if row else None
         if existing:
-            if existing["pinned"] and actor != "user":
-                return None
+            if (existing["pinned"] or existing["status"] == "archived") and actor != "user":
+                return None   # confirmed by the user / archived by the user: agents may not change or revive it
             if existing["value"] == value and existing["status"] == status and pinned is None:
                 return existing["id"]
             fields: dict[str, Any] = {"value": value, "source": source, "confidence": confidence, "status": status,
@@ -531,6 +531,10 @@ def list_facts(kind: str | None = None, status: str | None = "active") -> list[d
         sql += " AND status = ?"; params.append(status)
     sql += " ORDER BY kind, pinned DESC, confidence DESC, updated_at DESC"
     return q(sql, params)
+
+
+def set_fact_status(fact_id: str, status: str) -> None:
+    db.update("context_facts", "id", fact_id, {"status": status, "updated_at": utcnow()})
 
 
 def delete_fact(fact_id: str, actor: str = "user") -> None:

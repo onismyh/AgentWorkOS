@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import db, repo
-from ..brain import projects as projects_mod
+from ..brain import context as context_mod, projects as projects_mod
 from ..config import load_config
 from ..timeutil import local_today, tz
 from . import diagnose
@@ -108,8 +108,10 @@ class Dataset:
 
     def __init__(self) -> None:
         self.today = local_today()
-        self.projects = projects_mod.canonical_projects()
-        self.pkeys = {p["key"]: p for p in self.projects}
+        self.projects = projects_mod.canonical_projects()          # watched projects only: what the board lists
+        self.archived = sorted(repo.list_facts(kind="project", status="archived"), key=lambda f: f["updated_at"], reverse=True)
+        self.all_projects = [*self.projects, *self.archived]       # tasks keep their attribution to an archived project (history, "close what the board showed")
+        self.pkeys = {p["key"]: p for p in self.all_projects}
         self.tasks = {t["id"]: {**t, "meta": _j(t.get("meta"), {})} for t in db.q(
             "SELECT id, parent_id, root_id, title, description, kind, category, priority, level, level_cap, status, status_reason, executor, "
             "project, source, summary, cost_usd, created_at, updated_at, finished_at, meta FROM tasks")}
@@ -128,13 +130,16 @@ class Dataset:
                            "(entity_type = 'context' AND type IN ('created', 'updated')) ORDER BY id")
         self.var = load_config().path("var").resolve()
         self._tok = {k: _proj_tokens(k) for k in self.pkeys}
+        self.run_exec = {r["id"]: r["executor"] for r in self.runs}
+        notes = context_mod._latest_progress(repo.list_facts(kind="note", status="active"))   # newest `进展·<project>` note per project
+        self.progress = {self._match_name(name) or name: text for name, text in notes.items()}
         self.proj_of: dict[str, str | None] = {}
         for tid in self.tasks:
             self._resolve(tid)
 
     # ---- task -> project
     def _match_name(self, name: str | None) -> str | None:
-        m = projects_mod.match_project(name, self.projects)
+        m = projects_mod.match_project(name, self.all_projects)
         return m["key"] if m else None
 
     def _resolve(self, tid: str, depth: int = 0) -> str | None:
@@ -483,6 +488,171 @@ def _flow(ds: Dataset, tasks: list[dict], events: list[dict]) -> dict:
     return {"nodes": nodes + gates, "edges": edges, "truncated": len(tasks) > len(pick)}
 
 
+# --------------------------------------------------------------------------- review: health, state, last, asks, highlights
+
+# Thresholds of the portfolio review (days). Deterministic on purpose: the same rules feed the board and the guardian.
+STALLED_DAYS = 5            # no activity this long while there is open work (or a deadline within DEADLINE_WINDOW_DAYS) = stalled
+QUIET_DAYS = 14             # no tasks, no milestones and nothing for this long = quiet (neutral, not an alarm)
+RISK_SOON_DAYS = 3          # a deadline this close, while stalled or with open asks = risk
+ATTENTION_SOON_DAYS = 7     # a deadline this close = needs attention
+DEADLINE_WINDOW_DAYS = 30
+HEALTH_LEVELS = ("risk", "attention", "stalled", "ok", "quiet")
+HEALTH_LABEL = {"risk": "有风险", "attention": "要你处理", "stalled": "停滞", "ok": "正常", "quiet": "暂无动静"}
+OPEN_STATUSES = frozenset({"inbox", "triaged", "ready", "blocked", "running", "waiting_approval", "waiting_user", "review", "snoozed"})
+ASK_LABEL = {"decision": "拍板", "approval": "批准", "budget": "追加预算", "review": "验收", "handback": "接手"}
+STATE_MAX = 60
+HIGHLIGHTS_MAX = 6
+
+
+def _md(d: date) -> str:
+    return f"{d.month}月{d.day}日"
+
+
+def _until(today: date, iso: str | None) -> int | None:
+    try:
+        return (date.fromisoformat(iso) - today).days if iso else None
+    except ValueError:
+        return None
+
+
+def health_of(today: date, *, idle_days: int | None, tasks: int, tasks_active: int, tasks_failed: int, open_asks: int, milestones: list[dict],
+              pct: int = 0, pile_open: int | None = None) -> dict:
+    """Where a project stands, as {level, label, reason}. Pure: callers pass numbers, `idle_days` is days since the last activity (None = never).
+    milestones: dicts with title / status (effective: an undone date in the past is 'missed') / target_date (ISO or None); `pile_open` is only
+    set for the unassigned pile (tasks waiting for a project)."""
+    def out(level: str, reason: str) -> dict:
+        return {"level": level, "label": HEALTH_LABEL[level], "reason": reason}
+
+    if pile_open is not None:
+        if pile_open:
+            return out("attention", f"有 {pile_open} 个任务还没归到项目")
+        return out("ok" if tasks else "quiet", "没有待归类的任务" if tasks else "暂无动静")
+    open_ms = [m for m in milestones if m.get("status") != "done"]
+    overdue = [m for m in open_ms if m.get("status") == "missed" or (_until(today, m.get("target_date")) or 0) < 0]
+    upcoming = sorted(((n, m) for m in open_ms for n in [_until(today, m.get("target_date"))] if n is not None and n >= 0 and m.get("status") != "missed"),
+                      key=lambda x: x[0])
+    soon = upcoming[0] if upcoming else None
+    stalled = idle_days is None or idle_days >= STALLED_DAYS
+    open_work = tasks_active > 0 or open_asks > 0
+    idle_txt = f"{idle_days} 天没动静" if idle_days is not None else "还没有动静"
+
+    def due(n: int) -> str:
+        return "今天截止" if n == 0 else f"{_md(today + timedelta(days=n))}截止"
+
+    if overdue:
+        m = overdue[0]
+        n = _until(today, m.get("target_date"))
+        return out("risk", f"「{clip(m['title'], 14)}」{f'已逾期 {-n} 天' if n is not None and n < 0 else '已逾期'}")
+    if tasks_failed:
+        return out("risk", f"有 {tasks_failed} 个任务没做成")
+    if soon and soon[0] <= RISK_SOON_DAYS and (stalled or open_asks):
+        return out("risk", f"{due(soon[0])}，{idle_txt if stalled else f'还有 {open_asks} 项等你处理'}")
+    if open_asks:
+        return out("attention", f"有 {open_asks} 项等你处理")
+    if soon and soon[0] <= ATTENTION_SOON_DAYS:
+        return out("attention", f"{due(soon[0])}，进度 {pct}%")
+    near = soon is not None and soon[0] <= DEADLINE_WINDOW_DAYS
+    if stalled and (open_work or near):
+        return out("stalled", idle_txt if open_work or not near else f"{idle_txt}，{due(soon[0])}")
+    if tasks == 0 and not milestones and (idle_days is None or idle_days >= QUIET_DAYS):
+        return out("quiet", "没有任务，也没有里程碑")
+    if tasks_active:
+        return out("ok", f"{tasks_active} 个任务在推进")
+    if idle_days is None:
+        return out("ok", "一切平稳")
+    return out("ok", "今天有动静" if idle_days == 0 else f"{idle_days} 天前有动静")
+
+
+def _is_activity(e: dict) -> bool:
+    """Anything but the system merely noticing something (a discovered task, an automatic relink) counts as the project moving."""
+    return not (e["actor"] == "system" and e["kind"] in ("created", "relink"))
+
+
+def _sentence(text: Any, n: int = STATE_MAX) -> str:
+    s = clip(text, 400)
+    for i, ch in enumerate(s):
+        if ch in "。；;！!" and i >= 6:
+            s = s[:i]
+            break
+    return clip(s.rstrip("，、 "), n)
+
+
+def _tidy_note(text: str) -> str:
+    """A progress note as one readable phrase: no leftover bracket from a nested project name, no time stamp, no file paths."""
+    s = re.sub(r"^[）)\s]+", "", str(text or ""))
+    s = re.sub(r"^\d{2}-\d{2}(?: \d{2}:\d{2})?\s*", "", s)
+    s = re.sub(r"[A-Za-z]:[/\\][^\s，。；、）)]*", "", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _state_line(ds: Dataset, key: str, summary: str, pile_open: int | None) -> str:
+    if pile_open is not None:
+        return f"有 {pile_open} 个任务还没归到任何项目" if pile_open else "没有待归类的任务"
+    note = _tidy_note(ds.progress.get(key, ""))
+    return _sentence(note if len(note) >= 8 else summary)
+
+
+def _curate(ds: Dataset, events: list[dict]) -> list[dict]:
+    """The meaningful things, newest first, one plain sentence each: results agents delivered, decisions you made, interventions that changed
+    course, failures nobody recovered. The request / 'executed' / progress-update rows of the same thing collapse into one sentence."""
+    appr = {a["id"]: a for a in ds.approvals}
+    done_tasks = {e["refs"]["task"] for e in events if e["kind"] == "outcome" and e["outcome"] == "done"}
+    accepted = {e["refs"]["task"] for e in events if e["human"] and e["kind"] == "intervene" and e["title"].startswith("你验收通过")}
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    in_flight = 0
+    for e in events:
+        k, o, ref = e["kind"], e["outcome"], e["refs"]
+        a = appr.get(ref.get("approval") or "")
+        text, detail, key, actor, fallback = None, e["detail"], None, e["actor"], False
+        if e["human"] and k == "decision":
+            key, text = ("apv", ref["approval"]), e["title"]
+            if a and a["status"] == "executed":
+                text += "，已执行"
+            elif a and a["status"] == "failed":
+                text, o = text + "，执行没成功", "failed"
+        elif k == "action" and a and a.get("decided_via") == "auto":
+            key = ("apv", ref["approval"])
+            text = f"Agent 自动完成了：{e['title'].split('：', 1)[-1]}" if o == "done" else e["title"]
+            ex = ds.run_exec.get(a.get("run_id"))
+            actor = f"agent:{ex}" if ex else "agent"
+        elif k == "outcome" and o == "done":
+            key = ("task", ref["task"])
+            text = f"Agent 完成了：{e['title'].split('：', 1)[-1]}" + ("，你已验收" if ref["task"] in accepted else "")
+        elif (k == "outcome" or k == "run") and o == "failed":
+            key, text = ("fail", ref["task"]), e["title"]
+        elif e["human"] and k == "intervene":
+            if not (e["title"].startswith("你验收通过") and ref["task"] in done_tasks):   # folded into "Agent 完成了：…，你已验收"
+                key, text = ("ev", e["id"]), e["title"]
+        elif e["human"] and (k == "created" or (k == "milestone" and o == "done")):
+            key, text = ("ev", e["id"]), e["title"]
+        elif k == "run" and o == "done" and detail and in_flight < 2 and ref.get("task") and ref["task"] not in done_tasks \
+                and ds.tasks.get(ref["task"], {}).get("status") != "done":
+            key, text, fallback = ("run", ref["task"]), f"Agent 做了一轮：{e['task_title']}", True
+        if text is None or key in seen:
+            continue
+        seen.add(key)
+        in_flight += 1 if fallback else 0
+        out.append({"ts": e["ts"], "day": e["day"], "actor": actor, "human": e["human"], "text": clip(text, 120), "detail": clip(detail, 120), "outcome": o,
+                    "executor": e.get("executor"), "refs": ref, "_fallback": fallback})
+    return out
+
+
+def _asks(ds: Dataset, tasks: list[dict]) -> list[dict]:
+    """What is waiting on the user right now, newest first: pending approvals, deliveries to accept, tasks handed back."""
+    ids = {t["id"] for t in tasks}
+    out = []
+    for a in ds.approvals:
+        if a["task_id"] in ids and a["status"] == "pending":
+            kind = "decision" if a["kind"] in ("decision", "review") else "budget" if a["kind"] == "budget" else "approval"
+            out.append({"kind": kind, "label": ASK_LABEL[kind], "title": clip(a["title"], 90), "ts": a["created_at"], "ref": {"approval": a["id"]}})
+    for t in tasks:
+        if t["status"] in ("review", "waiting_user"):
+            kind = "review" if t["status"] == "review" else "handback"
+            out.append({"kind": kind, "label": ASK_LABEL[kind], "title": clip(t["title"], 90), "ts": t["updated_at"], "ref": {"task": t["id"]}})
+    return sorted(out, key=lambda x: (x["ts"], *x["ref"].values()), reverse=True)
+
+
 # --------------------------------------------------------------------------- views
 
 
@@ -496,13 +666,13 @@ def _stats(ds: Dataset, tasks: list[dict], events: list[dict]) -> dict:
         d["ok"] += 1 if r["status"] == "succeeded" else 0
     live = [t for t in tasks if t["status"] not in ("cancelled", "dismissed")]
     asks = sum(1 for a in ds.approvals if a["task_id"] in ids and a["status"] == "pending") + sum(1 for t in tasks if t["status"] in ("waiting_user", "review"))
-    stamps = [e["ts"] for e in events]
+    stamps = [e["ts"] for e in events if _is_activity(e)]
     return {"tasks": len(live), "tasks_done": sum(1 for t in live if t["status"] == "done"),
             "tasks_active": sum(1 for t in live if t["status"] in ("running", "ready", "blocked", "waiting_approval")),
-            "tasks_failed": sum(1 for t in live if t["status"] == "failed"),
+            "tasks_failed": sum(1 for t in live if t["status"] == "failed"), "tasks_open": sum(1 for t in live if t["status"] in OPEN_STATUSES),
             "agent_runs": len(runs), "agent_ok": sum(1 for r in runs if r["status"] == "succeeded"), "executors": per_exec,
             "interventions": sum(1 for e in events if e["human"]), "open_asks": asks,
-            "cost_usd": round(sum(float(r["cost_usd"] or 0) for r in runs), 3), "first_ts": min(stamps) if stamps else None, "last_ts": max(stamps) if stamps else None}
+            "cost_usd": round(sum(float(r["cost_usd"] or 0) for r in runs), 3), "first_ts": min((e["ts"] for e in events), default=None), "last_ts": max(stamps) if stamps else None}
 
 
 def _progress(stats: dict, miles: list[dict]) -> dict:
@@ -514,11 +684,11 @@ def _progress(stats: dict, miles: list[dict]) -> dict:
             "milestones": {"done": sum(1 for m in explicit if m["status"] == "done"), "total": len(explicit)}}
 
 
-def _next_milestone(miles: list[dict]) -> dict | None:
+def _next_milestone(miles: list[dict], today: date) -> dict | None:
     todo = [m for m in miles if m["status"] != "done" and m.get("target_date")]
     todo += [m for m in miles if m["status"] in ("planned", "active") and not m.get("target_date") and m["editable"]]
     m = todo[0] if todo else None
-    return {"title": m["title"], "target_date": m.get("target_date"), "status": m["status"]} if m else None
+    return {"title": m["title"], "target_date": m.get("target_date"), "status": m["status"], "days": _until(today, m.get("target_date"))} if m else None
 
 
 def _all_events(ds: Dataset) -> dict[str, list[dict]]:
@@ -530,24 +700,55 @@ def _all_events(ds: Dataset) -> dict[str, list[dict]]:
     return ev
 
 
-def _lane(ds: Dataset, key: str, name: str, summary: str, events: list[dict]) -> dict:
+def _review(ds: Dataset, key: str, name: str, summary: str, events: list[dict]) -> dict:
+    """Everything one project's row / review needs, computed once."""
     tasks = ds.project_tasks(key)
     stats = _stats(ds, tasks, events)
     miles = _milestones(ds, key, tasks)
-    return {"key": key, "name": name, "summary": clip(summary, 120), "progress": _progress(stats, miles), "next_milestone": _next_milestone(miles),
-            "last_activity": stats["last_ts"], "stats": {k: stats[k] for k in ("tasks", "tasks_done", "tasks_active", "agent_runs", "agent_ok", "interventions", "open_asks", "cost_usd")}}
+    progress = _progress(stats, miles)
+    pile_open = sum(1 for t in tasks if t["status"] in OPEN_STATUSES) if key == UNASSIGNED else None
+    idle = (ds.today - date.fromisoformat(_local_day(stats["last_ts"]))).days if stats["last_ts"] else None
+    health = health_of(ds.today, idle_days=idle, tasks=stats["tasks"], tasks_active=stats["tasks_active"], tasks_failed=stats["tasks_failed"],
+                       open_asks=stats["open_asks"], milestones=miles, pct=progress["pct"], pile_open=pile_open)
+    curated = _curate(ds, events)
+    first = next((c for c in curated if not c["_fallback"]), None)
+    return {"tasks": tasks, "stats": stats, "milestones": miles, "progress": progress, "health": health,
+            "state": _state_line(ds, key, summary, pile_open), "asks": _asks(ds, tasks),
+            "last": {"ts": first["ts"], "text": first["text"], "actor": first["actor"]} if first else None,
+            "highlights": [{k: v for k, v in c.items() if k != "_fallback"} for c in curated[:HIGHLIGHTS_MAX]],
+            "next": _next_milestone(miles, ds.today)}
+
+
+def _lane(ds: Dataset, key: str, name: str, summary: str, events: list[dict]) -> dict:
+    r = _review(ds, key, name, summary, events)
+    return {"key": key, "name": name, "summary": clip(summary, 120), "progress": r["progress"], "next_milestone": r["next"], "last_activity": r["stats"]["last_ts"],
+            "health": r["health"], "state": r["state"], "last": r["last"], "asks": r["asks"][:3],
+            "stats": {k: r["stats"][k] for k in ("tasks", "tasks_done", "tasks_active", "tasks_open", "agent_runs", "agent_ok", "interventions", "open_asks", "cost_usd")}}
+
+
+def _attention_order(lane: dict) -> tuple:
+    """risk, attention, stalled, ok, quiet; inside a group the nearest deadline first, then the most recent activity; the unassigned pile last."""
+    nm = lane["next_milestone"] or {}
+    days = nm.get("days")
+    ts = db.parse_ts(lane["last_activity"]) if lane["last_activity"] else None
+    return (HEALTH_LEVELS.index(lane["health"]["level"]), 1 if lane["key"] == UNASSIGNED else 0, days if days is not None else 10 ** 6, -(ts.timestamp() if ts else 0))
 
 
 def lanes() -> dict:
-    """The project list: every canonical project plus the pile of tasks nobody has assigned yet; busiest first."""
+    """The portfolio: every canonical project (also those with no tasks) plus the pile of unassigned tasks, in the order the user should look at them."""
     ds = Dataset()
     ev = _all_events(ds)
     out = [_lane(ds, p["key"], p["key"], p["value"], ev.get(p["key"], [])) for p in ds.projects]
-    out.sort(key=lambda p: (p["last_activity"] or ""), reverse=True)
     pile = _lane(ds, UNASSIGNED, UNASSIGNED_NAME, "还没有归到任何项目的任务", ev.get(UNASSIGNED, []))
-    if pile["stats"]["tasks"] or pile["last_activity"]:
+    if any(t["status"] in OPEN_STATUSES for t in ds.project_tasks(UNASSIGNED)):   # nothing open in the pile = nothing to review
         out.append(pile)
-    return {"projects": out, "today": ds.today.isoformat()}
+    out.sort(key=_attention_order)
+    archived = []
+    for f in ds.archived:   # no longer watched: kept as one quiet line each so it can be restored
+        mine = ds.project_tasks(f["key"])
+        archived.append({"key": f["key"], "name": f["key"], "summary": clip(f["value"], 120), "archived_at": f["updated_at"], "tasks": len(mine),
+                         "open": sum(1 for t in mine if t["status"] in OPEN_STATUSES)})
+    return {"projects": out, "archived": archived, "today": ds.today.isoformat()}
 
 
 def project_timeline(key: str) -> dict | None:
@@ -555,16 +756,16 @@ def project_timeline(key: str) -> dict | None:
     if key != UNASSIGNED and key not in ds.pkeys:
         return None
     ev = _all_events(ds)
-    events = ev.get(key, [])[:400]
-    tasks = ds.project_tasks(key)
-    stats = _stats(ds, tasks, events)
-    miles = _milestones(ds, key, tasks)
+    events = ev.get(key, [])
+    proj = ds.pkeys.get(key)
+    r = _review(ds, key, proj["key"] if proj else UNASSIGNED_NAME, proj["value"] if proj else "还没有归到任何项目的任务", events)
+    shown = events[:400]
     days: list[dict] = []
-    for e in events:
+    for e in shown:
         if not days or days[-1]["day"] != e["day"]:
             days.append({"day": e["day"], "label": _day_label(e["day"], ds.today), "events": []})
         days[-1]["events"].append(e)
-    proj = ds.pkeys.get(key)
     return {"key": key, "name": proj["key"] if proj else UNASSIGNED_NAME, "summary": clip(proj["value"], 300) if proj else "还没有归到任何项目的任务",
-            "today": ds.today.isoformat(), "stats": stats, "progress": _progress(stats, miles), "milestones": miles, "flow": _flow(ds, tasks, events), "days": days,
-            "event_count": len(events)}
+            "archived": proj is not None and proj.get("status") == "archived", "today": ds.today.isoformat(), "health": r["health"], "state": r["state"], "last": r["last"], "asks": r["asks"][:5], "highlights": r["highlights"],
+            "stats": r["stats"], "progress": r["progress"], "milestones": r["milestones"], "flow": _flow(ds, r["tasks"], shown), "days": days,
+            "event_count": len(shown)}

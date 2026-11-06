@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
 from tests.test_api import H, client, env  # noqa: F401  (fixtures)
 
 
@@ -159,6 +161,159 @@ def test_unknown_project_is_a_404_and_the_pile_of_unassigned_tasks_has_its_own_t
     assert tl["name"] == "未归类" and tl["stats"]["tasks"] == 1 and _events(tl)[0]["title"].startswith("你新建了任务")
 
 
+# --------------------------------------------------------------------------- the portfolio review: health, state, last, asks, highlights, archive
+
+TODAY = date(2026, 11, 6)
+BASE = dict(idle_days=1, tasks=3, tasks_active=1, tasks_failed=0, open_asks=0, milestones=[], pct=40)
+
+
+def _ms(days: int | None, status: str = "planned", title: str = "投稿") -> dict:
+    return {"title": title, "status": status, "target_date": None if days is None else (TODAY + timedelta(days=days)).isoformat()}
+
+
+HEALTH_CASES = [
+    # (changes to BASE, expected level, a phrase the reason must contain)
+    ({}, "ok", "1 个任务在推进"),
+    ({"tasks_active": 0}, "ok", "1 天前有动静"),
+    ({"idle_days": 0, "tasks_active": 0}, "ok", "今天有动静"),
+    ({"milestones": [_ms(-3, "missed", "初稿")]}, "risk", "「初稿」已逾期 3 天"),
+    ({"milestones": [_ms(-1)]}, "risk", "已逾期 1 天"),                                   # past date, not yet flagged by the caller
+    ({"milestones": [_ms(-3, "missed")], "open_asks": 2}, "risk", "已逾期"),               # overdue beats open asks
+    ({"tasks_failed": 2}, "risk", "有 2 个任务没做成"),
+    ({"milestones": [_ms(3)], "idle_days": 6}, "risk", "11月9日截止，6 天没动静"),            # <=3 days away while stalled
+    ({"milestones": [_ms(3)], "open_asks": 2}, "risk", "还有 2 项等你处理"),                  # <=3 days away with open asks
+    ({"milestones": [_ms(0)], "idle_days": None}, "risk", "今天截止，还没有动静"),
+    ({"milestones": [_ms(3)]}, "attention", "11月9日截止，进度 40%"),                         # close but being worked on
+    ({"open_asks": 2}, "attention", "有 2 项等你处理"),
+    ({"milestones": [_ms(7)]}, "attention", "进度 40%"),
+    ({"milestones": [_ms(8)]}, "ok", "1 个任务在推进"),                                    # >7 days away, nothing wrong
+    ({"idle_days": 5}, "stalled", "5 天没动静"),                                         # open work and 5 quiet days
+    ({"idle_days": 4}, "ok", "1 个任务在推进"),
+    ({"idle_days": 9, "tasks_active": 0, "milestones": [_ms(20)]}, "stalled", "9 天没动静，11月26日截止"),   # no open work but a deadline within 30 days
+    ({"idle_days": 9, "tasks_active": 0, "milestones": [_ms(40)]}, "ok", "9 天前有动静"),
+    ({"idle_days": 9, "tasks_active": 0}, "ok", "9 天前有动静"),                          # nothing open, nothing due: not an alarm
+    ({"idle_days": None, "tasks_active": 1}, "stalled", "还没有动静"),
+    ({"milestones": [_ms(-5, "done")], "tasks_active": 0}, "ok", "天前有动静"),            # finished milestones are ignored
+    ({"tasks": 0, "tasks_active": 0, "idle_days": 20}, "quiet", "没有任务，也没有里程碑"),
+    ({"tasks": 0, "tasks_active": 0, "idle_days": None}, "quiet", "没有任务"),
+    ({"tasks": 0, "tasks_active": 0, "idle_days": 3}, "ok", "3 天前有动静"),               # recent life is not quiet
+    ({"tasks": 0, "tasks_active": 0, "idle_days": 20, "milestones": [_ms(60)]}, "ok", "20 天前有动静"),
+]
+
+
+@pytest.mark.parametrize("change, level, phrase", HEALTH_CASES, ids=[f"{i}-{c[1]}" for i, c in enumerate(HEALTH_CASES)])
+def test_health_rules_table(change, level, phrase):
+    from awos.api import timeline
+    h = timeline.health_of(TODAY, **{**BASE, **change})
+    assert h["level"] == level and h["label"] == timeline.HEALTH_LABEL[level] and phrase in h["reason"], h
+    assert set(h) == {"level", "label", "reason"} and len(h["reason"]) <= 40
+
+
+def test_health_pile_thresholds_and_labels():
+    from awos.api import timeline
+    assert (timeline.STALLED_DAYS, timeline.QUIET_DAYS, timeline.RISK_SOON_DAYS, timeline.ATTENTION_SOON_DAYS, timeline.DEADLINE_WINDOW_DAYS) == (5, 14, 3, 7, 30)
+    assert [timeline.HEALTH_LABEL[k] for k in timeline.HEALTH_LEVELS] == ["有风险", "要你处理", "停滞", "正常", "暂无动静"]
+    pile = lambda **kw: timeline.health_of(TODAY, **{**BASE, "pile_open": 3, **kw})        # noqa: E731
+    assert pile()["level"] == "attention" and "3 个任务还没归到项目" in pile()["reason"]
+    assert pile(pile_open=0)["level"] == "ok" and pile(pile_open=0, tasks=0)["level"] == "quiet"
+
+
+def test_lanes_follow_attention_order_and_carry_the_review_fields(client):
+    from awos import repo
+    names = ["风险项目", "关注项目", "停滞项目", "正常项目", "安静项目"]
+    for n in names:
+        _project(n, f"{n}的说明")
+    past = (date.today() - timedelta(days=3)).isoformat()
+    client.post("/api/milestones", json={"project_key": "风险项目", "title": "初稿", "target_date": past}, headers=H)
+    t = _task("等拍板的任务", project="关注项目", status="waiting_approval")
+    ask = repo.create_approval(title="选哪个方案", kind="decision", task_id=t, options=[{"key": "a", "label": "方案 A"}])
+    _task("没人管的任务", project="停滞项目", status="ready", source="sensor:git")           # open work, and nobody has touched it
+    _task("在推进的任务", project="正常项目", status="running")
+    repo.upsert_fact("note", "进展·正常项目", "（正常项目）11-05 18:37 基线：已完成第一章；其余待办。", source="t", actor="agent")
+    lanes = client.get("/api/timeline").json()["projects"]
+    assert [p["key"] for p in lanes if p["key"] in names] == names                       # risk, attention, stalled, ok, quiet; every project is listed
+    by = {p["key"]: p for p in lanes}
+    assert [by[n]["health"]["level"] for n in names] == ["risk", "attention", "stalled", "ok", "quiet"]
+    assert by["风险项目"]["health"] == {"level": "risk", "label": "有风险", "reason": "「初稿」已逾期 3 天"}
+    assert by["关注项目"]["asks"] == [{"kind": "decision", "label": "拍板", "title": "选哪个方案", "ts": by["关注项目"]["asks"][0]["ts"], "ref": {"approval": ask}}]
+    assert by["停滞项目"]["health"]["reason"] == "还没有动静" and by["安静项目"]["health"]["label"] == "暂无动静"
+    assert by["正常项目"]["state"] == "基线：已完成第一章" and by["风险项目"]["state"] == "风险项目的说明"       # newest progress note, else the summary
+    for p in lanes:
+        assert len(p["state"]) <= 60 and set(p["health"]) == {"level", "label", "reason"} and len(p["asks"]) <= 3
+        assert {"key", "name", "progress", "next_milestone", "last_activity", "stats", "last"} <= set(p)
+        assert {"tasks_active", "open_asks"} <= set(p["stats"])
+    assert by["风险项目"]["next_milestone"]["days"] == -3
+    first = by["关注项目"]["last"]
+    assert first is None or {"ts", "text", "actor"} == set(first)
+
+
+def test_asks_are_capped_newest_first_and_point_at_the_inbox_item(client):
+    from awos import repo
+    _project("忙项目")
+    t = _task("很多请求", project="忙项目", status="waiting_approval")
+    ids = [repo.create_approval(title=f"批准{i}", kind="action", action_type="git_commit", task_id=t, options=[{"key": "approve", "label": "批准"}]) for i in range(1, 7)]
+    review = _task("待验收", project="忙项目", status="review")
+    lane = next(p for p in client.get("/api/timeline").json()["projects"] if p["key"] == "忙项目")
+    assert len(lane["asks"]) == 3
+    detail = _tl(client, "忙项目")
+    assert len(detail["asks"]) == 5 and detail["stats"]["open_asks"] == 7                    # shown capped, counted in full
+    assert [a["title"] for a in detail["asks"]][:2] == ["待验收", "批准6"] or detail["asks"][0]["ref"] in ({"task": review}, {"approval": ids[-1]})
+    assert all(a["label"] and (set(a["ref"]) == {"approval"} or set(a["ref"]) == {"task"}) for a in detail["asks"])
+    assert {a["kind"] for a in detail["asks"]} <= {"approval", "decision", "budget", "review", "handback"}
+
+
+def test_highlights_collapse_duplicates_into_one_plain_sentence_and_cap_at_six(client):
+    from awos import repo
+    from awos.engine import actions
+    _project("要点项目")
+    t = _task("整理文件", project="要点项目", level=4, executor="codex")
+    rid = _run(t, "codex", summary="整理好了")
+    ask = repo.create_approval(title="提交整理结果", kind="action", action_type="git_commit", task_id=t, run_id=rid, options=[{"key": "approve", "label": "批准"}])
+    repo.decide_approval(ask, "approve", note="先别推送", via="dashboard")
+    repo.set_approval_status(ask, "executed", result={"done": True, "details": "ok"})
+    auto = repo.create_approval(title="独立提交脚本", kind="action", action_type="git_commit", task_id=t, run_id=rid, options=[{"key": "approve", "label": "批准"}])
+    repo.decide_approval(auto, "approve", via="auto", actor="system")
+    repo.set_approval_status(auto, "executed", result={"done": True, "details": "ok"})
+    repo.set_task_status(t, "done", "完成", actor="system", force=True)
+    broken = _task("会失败的活", project="要点项目", status="ready")
+    _run(broken, "claude", status="failed", summary=None, error="boom", error_class="permanent")
+    d = _tl(client, "要点项目")
+    hl = d["highlights"]
+    texts = [h["text"] for h in hl]
+    assert any(x.startswith("你批准了（提交代码）：提交整理结果") and x.endswith("，已执行") for x in texts)        # request + decision + "executed" = one sentence
+    assert sum(1 for h in hl if h["refs"].get("approval") == ask) == 1 and not any(x.startswith(("请你批准", "已执行")) for x in texts)
+    assert any(x == "Agent 自动完成了：独立提交脚本" for x in texts) and any(x.startswith("Agent 完成了：整理文件") for x in texts)
+    assert any(h["outcome"] == "failed" and "没成功" in h["text"] for h in hl)                                 # an unrecovered failure is a highlight
+    assert not any(x.startswith("Agent 做了一轮：整理文件") for x in texts)                                    # run noise of a finished task is dropped
+    for i in range(8):
+        actions.cancel_task(_task(f"不要了{i}", project="要点项目"), reason="不需要了")
+    hl = _tl(client, "要点项目")["highlights"]
+    assert len(hl) == 6 and sum(h["human"] for h in hl) >= 4 and [h["ts"] for h in hl] == sorted((h["ts"] for h in hl), reverse=True)   # same-second events may interleave
+    assert all({"ts", "day", "actor", "human", "text", "detail", "outcome", "refs"} <= set(h) for h in hl)
+    assert next(p for p in client.get("/api/timeline").json()["projects"] if p["key"] == "要点项目")["last"]["ts"] == hl[0]["ts"]                  # `last` is the newest curated line
+    assert {"flow", "days", "milestones", "stats", "health", "state", "asks", "highlights"} <= set(_tl(client, "要点项目"))     # the folded record keeps its data
+
+
+def test_archived_projects_leave_the_board_but_keep_their_history(client):
+    from awos import repo
+    _project("旧项目", "已经结束的项目")
+    _project("在盯的项目")
+    old = _task("旧任务", project="旧项目", status="ready")
+    done = _task("旧的完成", project="旧项目", status="done")
+    _task("别的", project="在盯的项目", status="running")
+    repo.upsert_fact("project", "旧项目", "已经结束的项目", source="user", actor="user", pinned=True, status="archived")
+    body = client.get("/api/timeline").json()
+    keys = [p["key"] for p in body["projects"]]
+    assert "旧项目" not in keys and "在盯的项目" in keys and "__none__" not in keys          # not listed, not in any group, not dumped on the 未归类 pile
+    arch = body["archived"]
+    assert [(a["key"], a["name"], a["summary"], a["tasks"], a["open"]) for a in arch] == [("旧项目", "旧项目", "已经结束的项目", 2, 1)] and arch[0]["archived_at"]
+    d = _tl(client, "旧项目")                                                              # still readable, read-only history
+    assert d["archived"] is True and {n["id"] for n in d["flow"]["nodes"] if n["type"] == "task"} == {old, done} and _tl(client, "在盯的项目")["archived"] is False
+    repo.upsert_fact("project", "旧项目", "已经结束的项目", source="user", actor="user", pinned=True, status="active")   # restored
+    body = client.get("/api/timeline").json()
+    assert "旧项目" in [p["key"] for p in body["projects"]] and body["archived"] == [] and _tl(client, "旧项目")["archived"] is False
+
+
 # --------------------------------------------------------------------------- front end (no browser; node is used when available)
 
 import json  # noqa: E402
@@ -173,16 +328,24 @@ DASH = Path(__file__).resolve().parents[1] / "src" / "awos" / "dashboard"
 NODE = shutil.which("node")
 
 
-def test_timeline_mode_is_wired_into_the_board():
+def test_review_board_is_wired_into_the_board_and_the_dead_ui_is_gone():
     imports = re.findall(r'@import url\("([^"]+)"\)', (DASH / "style.css").read_text(encoding="utf-8"))
     assert imports.index("css/timeline.css") < imports.index("css/glass.css")                      # glass overrides, so it stays last
     board = (DASH / "js" / "views" / "board.js").read_text(encoding="utf-8")
-    assert "mode') === 'timeline'" in board and "modeSwitch('board')" in board and "d?.__timeline" in board
+    assert "mode') === 'timeline'" in board and "modeSwitch('board')" in board and "d?.__timeline" in board and "timeline.mount(el, d)" in board
     tl = (DASH / "js" / "views" / "project-timeline.js").read_text(encoding="utf-8")
-    assert "'/timeline'" in tl and "/timeline`" in tl and "'/milestones'" in tl and "role=\"button\"" in tl
-    assert ".tl-main > *" in (DASH / "js" / "shell.js").read_text(encoding="utf-8")                 # joins the navigation-only entrance cascade
+    assert "api('/timeline')" in tl and "/timeline`" in tl and "'/milestones'" in tl and "#/inbox?sel=" in tl
+    for needle in ("需要关注", "进展正常", "暂无动静", "要你处理", "近期要点", "里程碑", "完整记录", "任务关系图", "去处理"):      # the review's vocabulary
+        assert needle in tl, needle
+    body = tl[tl.index("function reviewHTML"):]
+    assert body.index('class="tl-full"') < body.index("graphHTML(d)") < body.index('id="tl-chips"')       # the diagram is folded INSIDE the full record
+    assert "tl-archive" in tl and "tl-restore" in tl and "/archive`" in tl and "/restore`" in tl and "已归档" in tl and "close_open" in tl
+    assert "key === PILE" in tl and "d.key !== PILE" in tl                                          # the 未归类 pile cannot be archived
+    assert ".tl-row" in (DASH / "js" / "shell.js").read_text(encoding="utf-8")                      # joins the navigation-only entrance cascade
     css = (DASH / "css" / "timeline.css").read_text(encoding="utf-8")
-    assert "@media (max-width: 900px)" in css and "prefers-reduced-motion" in css
+    assert "@media (max-width: 900px)" in css and "prefers-reduced-motion" in css and ".tl-group.arch" in css
+    for dead in ("tl-stats", "tl-stat-", "tl-exs", "tl-lane", "ms-rail", "tl-main", "tl-head"):                   # tiles, executor line, side list and rail were removed
+        assert dead not in tl and dead not in css, dead
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")

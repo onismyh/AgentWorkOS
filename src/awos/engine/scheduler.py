@@ -193,11 +193,21 @@ class Scheduler:
         if not last or db.parse_ts(last) < datetime.now(timezone.utc) - timedelta(hours=hours):
             if repo.kv_get("context.auto", True):
                 self._background("context", _context_job)
+        if os.environ.get("AWOS_DISABLE_SENSORS") != "1":   # scheduled collection/review is off in tests
+            from . import guardian
+            if guardian.due(now):
+                repo.kv_set("guardian.last_day", today)
+                self._background("guardian", _guardian_job)
         for hm in cfg.get("notify.digest_times", []) or []:
             key = f"digest.{today}.{hm}"
             if now.strftime("%H:%M") >= hm and not repo.kv_get(key):
                 repo.kv_set(key, utcnow())
                 self._background(f"digest:{hm}", _digest_job, hm)
+
+
+def _guardian_job() -> None:
+    from . import guardian
+    guardian.review_projects()
 
 
 def _topics_job() -> None:

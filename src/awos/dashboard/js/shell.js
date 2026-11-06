@@ -86,7 +86,7 @@ function moveNavInd() {
   ind.style.opacity = '1'; ind.style.width = `${on.offsetWidth}px`; ind.style.height = `${on.offsetHeight}px`;
   ind.style.transform = `translate(${on.offsetLeft}px, ${on.offsetTop}px)`;
 }
-const FLOW_SEL = '.page-head, .kpi, .wb, .grid12 > *, .ctx-add, .ctx-main > .card, .bhead, .cell, .bcard, .tgroup, .art-card, .sensor, .filter-bar, .toolbar, .table-wrap, .sp-list, .sp-pane, .view-tabs, .view > .card, .tl-bar, .tl-lanes, .tl-main > *';
+const FLOW_SEL = '.page-head, .kpi, .wb, .grid12 > *, .ctx-add, .ctx-main > .card, .bhead, .cell, .bcard, .tgroup, .art-card, .sensor, .filter-bar, .toolbar, .table-wrap, .sp-list, .sp-pane, .view-tabs, .view > .card, .tl-bar, .tl-group > header, .tl-row';
 let flowTimer = 0;
 /** Entrance cascade: what is on screen rises in one after another (stagger = --i). Runs on navigation only, never on a live refresh. */
 function playFlow(el) {

@@ -258,6 +258,6 @@ export function bindBoard(root) {
   });
 }
 
-export function mount(el, d) { if (d?.__timeline) { timeline.mount(el); return; } const host = $('#board-host', el); if (host && !host.dataset.bound) { host.dataset.bound = '1'; bindBoard(host); } }
+export function mount(el, d) { if (d?.__timeline) { timeline.mount(el, d); return; } const host = $('#board-host', el); if (host && !host.dataset.bound) { host.dataset.bound = '1'; bindBoard(host); } }
 
 export default { id: 'board', title: '看板', sub: '建议 → 排队 → 执行 → 等你 → 完成，拖拽卡片即可接受或忽略', icon: 'kanban', load, render, mount, skeleton: skeletonList, busy: boardBusy };

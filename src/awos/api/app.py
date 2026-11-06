@@ -195,6 +195,10 @@ class MilestonePatch(BaseModel):
     status: str | None = Field(default=None, pattern=r"^(planned|active|done|missed)$")
 
 
+class ArchiveBody(BaseModel):
+    close_open: bool = False
+
+
 class FactBody(BaseModel):
     kind: str = Field(pattern=r"^[a-z_]{1,32}$")
     key: str = Field(min_length=1, max_length=200)
@@ -1163,6 +1167,16 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
         _require({"id": milestone_id} if repo.delete_milestone(milestone_id) else None, milestone_id)
         return {"ok": True}
     # ---- end project timeline ----------------------------------------------------------------------------------------------
+
+    @app.post("/api/projects/{key:path}/archive")
+    def project_archive(key: str, body: ArchiveBody) -> dict:
+        if key == timeline_mod.UNASSIGNED:
+            raise HTTPException(422, "the pile of unassigned tasks is not a project")
+        return actions.archive_project(key, close_open=body.close_open, actor="user")
+
+    @app.post("/api/projects/{key:path}/restore")
+    def project_restore(key: str) -> dict:
+        return actions.restore_project(key, actor="user")
 
     @app.post("/api/context", status_code=201)
     def context_add(body: FactBody) -> dict:
