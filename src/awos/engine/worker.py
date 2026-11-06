@@ -277,6 +277,7 @@ def _process(task: dict, owner: str) -> None:
                                 cwd=workspace, sandbox=dec.sandbox, output_schema=EXECUTE_SCHEMA,
                                 add_dirs=dec.readable + extra_dirs, allow_network=True, allow_connectors=False,
                                 net_allow=list((repo.get_task(task["id"]) or task).get("meta", {}).get("network_allow") or []),
+                                net_defaults=not decision.trusted_only,   # mail / private content: only what the user approved
                                 max_budget_usd=max(0.1, min(remaining, run_cap)))
         if res.status == "succeeded" and res.structured:
             break

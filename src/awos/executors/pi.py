@@ -161,7 +161,7 @@ class PiExecutor(Executor):
         # anything the next run would load or execute.
         (home / "tmp").mkdir(parents=True, exist_ok=True)
         writable = [home / "tmp", home / "auth.json.lock"] + ([] if spec.sandbox == "read-only" else [spec.cwd])
-        with egress.EgressProxy([*sandbox.allowed_domains(spec), *sandbox.AGENT_DOMAINS["pi"]]) as px:
+        with egress.EgressProxy([*sandbox.allowed_domains(spec), *sandbox.pi_domains(model, home / "auth.json")]) as px:
             argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
                                         readable=[spec.cwd, home, *spec.add_dirs],
                                         writable_files=[home / "models-store.json", home / "mcp.log"],

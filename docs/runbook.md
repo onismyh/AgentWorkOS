@@ -100,6 +100,8 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 
 - 在本次任务的工作区里读写（只读任务不能写），装依赖：`npm/pip/uv/cargo/go` 的缓存放在本次运行的私有临时目录里，不写 `~/.npm`、`~/.cache`。
 - 命令行联网到常用的包仓库和代码托管站点：pypi、npm、GitHub、GitLab、Gitee、crates、Go proxy、conda、CTAN、Hugging Face 和常见国内镜像。列表见 `DEFAULT_DOMAINS`，可以用 `sandbox.allowed_domains` 改。本机设了系统代理时自动经它出去。
+  - 带邮件或私人内容的任务没有这个默认名单，只能访问你批准过的域名。
+  - 通配只能用 `*.具体站点`，`*.github.io`、`*.workers.dev` 这类谁都能注册子域名的后缀不行。
 - 读用户的项目目录和可读目录。
 
 **一律拦下的**
@@ -124,8 +126,8 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 |---|---|---|
 | claude | Claude Code 自带沙箱，没有"不走沙箱"的后门（`allowUnsandboxedCommands=false`）；Read/Edit 对凭据和 `var/` 敏感文件另有拒绝规则 | 沙箱的 `allowedDomains`，Claude 自己的代理执行，会告诉 agent 哪个域名被拦了 |
 | codex | Codex 权限配置（`permissions.awos`），实测优先于用户配置里的 `sandbox_mode`；低于 0.167 退回 `-s` | Codex 自带的 network proxy + 域名名单 |
-| dsh | 整个进程套 Seatbelt；`runtime/dsh-home` 只有数据目录可写，配置层、`AGENTS.md`、skills、`.env` 只读 | 只能连本次运行的过滤代理（DeepSeek API + 名单，拒绝内网地址），被拦的域名会记下来 |
-| pi | 整个进程套 Seatbelt；`runtime/pi-home` 只有 `tmp/` 和两个缓存文件可写，工具（rg、fd 由 setup 预装）、设置、MCP 配置、扩展只读 | 同 dsh |
+| dsh | 整个进程套 Seatbelt；`runtime/dsh-home` 只有数据目录可写，配置层、`AGENTS.md`、skills、`.env` 只读 | 只能连本次运行的过滤代理：DeepSeek API 加名单；HTTPS 的 TLS 域名（SNI）必须和申请的一致，防止借同一个 CDN 访问别的站；拒绝内网地址；被拦的域名会记下来 |
+| pi | 整个进程套 Seatbelt；`runtime/pi-home` 只有 `tmp/` 和两个缓存文件可写，工具（rg、fd 由 setup 预装）、设置、MCP 配置、扩展只读 | 同 dsh；模型 API 按它实际用的服务商放行（DeepSeek，或登录的 Anthropic/OpenAI/Copilot 等） |
 
 四个执行器在 macOS 上都实测过：在工作区里 `npm install` 成功；访问 example.com、读 `~/.ssh` 里的探针文件、写工作区外、读 `var/api_token`、连本机服务器都被拦下。
 
@@ -140,9 +142,11 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 - 仓库配置了 git hooks（pre-commit、commit-msg 等，含 `core.hooksPath`/husky）时，hooks 照常运行：
   - 系统在 `var/tmp` 里建一个临时副本（`clone --shared`），在沙箱里正常 `git commit`。hooks 能格式化文件，改动会进提交；不通过就不提交，并把输出写进审批结果。
   - 沙箱里只有这个副本可写；你装好的 `node_modules`、`.venv` 以只读方式接进去；联网走同样的域名名单。
+  - 写入你的仓库之前先检查：必须正好是一个基于原分支顶端的提交，只改了列出的文件，不含凭据类文件。不合格就不写。
   - 提交取回到你的仓库，用带旧值校验的方式写入分支。
+  - 系统自己在副本里跑的 git 命令（检出等）不会运行副本里的任何 hooks。
   - 没有沙箱的平台上，这类提交要你批准后才运行 hooks。
-- 其他分支、main/master 和远端默认分支、MR/PR 都要批准。
+- 其他分支、main/master 和远端默认分支、MR/PR 都要批准。你当前检出的分支也要批准：自动提交从不动你的工作区。
 - 敏感任务的 git 动作一律要批准，判断时会沿着上级任务一路往上查，所以拆出来的子任务也算：
   - 实际层级（按类别上限算）是 L1/L2 或只读沙箱的任务；
   - 私人类别（`routing.private_categories`）的任务；

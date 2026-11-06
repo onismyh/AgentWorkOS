@@ -114,7 +114,7 @@ def create_from_result(task: dict, run_id: str, out: dict) -> list[str]:
                             if risk != "high" else "请仔细核对后再批准：这是高风险动作，批准前务必逐项确认「批准后将执行的内容」。"),
             options=ACTION_OPTIONS, risk=risk,
             payload={**payload, "_hash": payload_hash(payload)}, expires_at=_expiry(risk)))
-    sid = suggest_network(task, run_id, out.get("proposed_actions") or [])
+    sid = suggest_network(task, run_id, out.get("proposed_actions") or [], out.get("status"))
     if sid:
         ids.append(sid)
     return ids
@@ -145,10 +145,12 @@ def _network_note(payload: dict) -> tuple[str, str]:
                       f"\n\n**要放行的域名**：{', '.join(doms)}")
 
 
-def suggest_network(task: dict, run_id: str, proposed: list[dict]) -> str | None:
+def suggest_network(task: dict, run_id: str, proposed: list[dict], out_status: str | None = None) -> str | None:
     """Domains the run was refused (recorded by the egress proxy) that the agent did not ask for itself: offer them to
     the user as one grant_network approval instead of failing silently."""
     if any((a.get("type") or "") == "grant_network" for a in proposed):
+        return None
+    if (out_status or "completed") == "completed":   # the task got done anyway: nothing worth interrupting the user for
         return None
     from ..executors.egress import valid_domain
     rows = db.q("SELECT data FROM run_events WHERE run_id = ? AND kind = 'network_denied'", (run_id,))
@@ -159,6 +161,9 @@ def suggest_network(task: dict, run_id: str, proposed: list[dict]) -> str | None
             if valid_domain(h) and h not in hosts:
                 hosts.append(h)
     have = set((task.get("meta") or {}).get("network_allow") or [])
+    for a in repo.list_approvals(task_id=task["id"], limit=200):   # asked before (granted, refused, expired or pending)
+        if a.get("action_type") == "grant_network":
+            have |= {str(d).lower() for d in (a.get("payload") or {}).get("domains") or []}
     hosts = [h for h in hosts if h not in have][:20]
     if not hosts:
         return None

@@ -93,16 +93,39 @@ DEFAULT_DOMAINS = (
 )
 # What each confined agent's own process needs (its model API), whatever the task's network setting.
 AGENT_DOMAINS = {"pi": ("api.deepseek.com",), "dsh": ("api.deepseek.com", "platform.deepseek.com")}
+# Pi talks to whichever provider its model / login is for.
+PROVIDER_DOMAINS = {
+    "deepseek": ("api.deepseek.com",),
+    "anthropic": ("api.anthropic.com", "console.anthropic.com"),
+    "openai": ("api.openai.com",),
+    "openai-codex": ("chatgpt.com", "auth.openai.com"),
+    "github-copilot": ("api.githubcopilot.com", "api.github.com", "github.com"),
+    "google": ("generativelanguage.googleapis.com",),
+    "google-gemini-cli": ("cloudcode-pa.googleapis.com", "oauth2.googleapis.com"),
+    "openrouter": ("openrouter.ai",),
+    "moonshot": ("api.moonshot.cn",), "zhipu": ("open.bigmodel.cn",), "qwen": ("dashscope.aliyuncs.com",),
+}
+
+
+def pi_domains(model: str | None, auth_file: Path | None) -> list[str]:
+    """Model API hosts for Pi: its configured model's provider plus every provider it holds a login for."""
+    providers = {(model or "deepseek/").split("/", 1)[0]}
+    try:
+        providers |= set(json.loads(auth_file.read_text(encoding="utf-8"))) if auth_file and auth_file.is_file() else set()
+    except (OSError, ValueError):
+        pass
+    return sorted({d for p in providers for d in PROVIDER_DOMAINS.get(p, ())} or set(AGENT_DOMAINS["pi"]))
 
 
 def allowed_domains(spec) -> list[str]:
     """Domains a run's shell commands may reach: none for offline runs, else the defaults (`sandbox.allowed_domains`
-    replaces them) plus what the user approved for this task."""
+    replaces them; none for tasks carrying mail / private content) plus what the user approved for this task."""
     from .egress import valid_domain
     if not spec.allow_network:
         return []
     base = load_config().get("sandbox.allowed_domains")
-    doms = [*(base if base is not None else DEFAULT_DOMAINS), *(spec.net_allow or [])]
+    defaults = (base if base is not None else DEFAULT_DOMAINS) if getattr(spec, "net_defaults", True) else []
+    doms = [*defaults, *(spec.net_allow or [])]
     return sorted({d.lower() for d in doms if valid_domain(d)})
 
 

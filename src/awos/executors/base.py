@@ -27,6 +27,7 @@ class RunSpec:
     add_dirs: list[Path] = field(default_factory=list)   # extra dirs the agent may READ (and write if sandbox allows)
     allow_network: bool = True                  # web search / fetch, and shell access to the allowed domains
     net_allow: list[str] = field(default_factory=list)    # extra domains the user approved for this task (grant_network)
+    net_defaults: bool = True                   # shell may reach the default package/code domains (off for mail / private)
     allow_connectors: bool = False              # codex apps (gmail/notion/drive...) allowed in this run
     max_budget_usd: float | None = None
     env: dict[str, str] | None = None

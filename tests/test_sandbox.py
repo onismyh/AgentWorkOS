@@ -312,7 +312,9 @@ def test_egress_proxy_allowlist_and_internal_addresses(tmp_path):
     import threading
     from awos.executors.egress import EgressProxy, host_allowed, valid_domain
     assert valid_domain("pypi.org") and valid_domain("*.github.com")
-    assert not any(valid_domain(d) for d in ("*.com", "127.0.0.1", "localhost", "", "a b.com", "*"))
+    assert not any(valid_domain(d) for d in ("*.com", "127.0.0.1", "localhost", "", "a b.com", "*", "127.1", "0x7f.0.0.1",
+                                             "*.co.uk", "*.github.io", "*.workers.dev", "evil.com#.example.com"))
+    assert not host_allowed("evil.com#.example.com", ["*.example.com"]) and not host_allowed("127.1", ["127.1"])
     assert host_allowed("files.github.com", ["*.github.com"]) and not host_allowed("github.com", ["*.github.com"])
     assert not host_allowed("evilgithub.com", ["*.github.com", "github.com"])
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
@@ -343,3 +345,43 @@ def test_allowed_domains_follow_the_run_and_the_users_grants(tmp_path):
     args = sandbox.codex_network(["pypi.org"])
     assert "features.network_proxy.enabled=true" in args and any('"pypi.org" = "allow"' in a for a in args)
     assert sandbox.codex_network([]) == []
+
+
+def test_egress_proxy_requires_the_tls_name_to_match_the_tunnel(monkeypatch):
+    import socket
+    import struct
+    from awos.executors import egress
+
+    def hello(name: str) -> bytes:
+        sni = name.encode()
+        ext = struct.pack(">HHHBH", 0, len(sni) + 5, len(sni) + 3, 0, len(sni)) + sni
+        body = b"\x03\x03" + b"\0" * 32 + b"\x00" + b"\x00\x02\x13\x01" + b"\x01\x00" + struct.pack(">H", len(ext)) + ext
+        hs = b"\x01" + len(body).to_bytes(3, "big") + body
+        return b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
+
+    assert egress.sni_of(hello("registry.npmjs.org")) == "registry.npmjs.org" and egress.sni_of(b"GET / HTTP/1.1") is None
+    monkeypatch.setattr(egress, "resolves_internal", lambda host, behind_upstream=False: False)
+    opened = []
+    monkeypatch.setattr(egress.EgressProxy, "connect", lambda self, host, port: opened.append(host) or socket.socket())
+    with egress.EgressProxy(["registry.npmjs.org"], upstream=None) as px:
+        c = socket.create_connection(("127.0.0.1", px.port), timeout=5)
+        c.sendall(b"CONNECT registry.npmjs.org:443 HTTP/1.1\r\n\r\n")
+        assert b" 200" in c.recv(200)
+        c.sendall(hello("www.cloudflare.com"))                       # domain fronting: allowed tunnel, other site's TLS
+        c.settimeout(5)
+        assert c.recv(100) == b""                                       # closed, never connected upstream
+        c.close()
+        assert opened == [] and any("www.cloudflare.com" in d for d in px.denied)
+        c = socket.create_connection(("127.0.0.1", px.port), timeout=5)
+        c.sendall(b"GET http://registry.npmjs.org/ HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        assert b" 403" in c.recv(200)                                   # plain HTTP: Host must name the URL's host
+        c.close()
+
+
+def test_network_defaults_off_for_mail_tasks_and_pi_follows_its_provider(tmp_path):
+    spec = _spec(tmp_path, net_defaults=False, net_allow=["example.org"])
+    assert sandbox.allowed_domains(spec) == ["example.org"]
+    (tmp_path / "auth.json").write_text('{"anthropic": {"type": "oauth"}}', encoding="utf-8")
+    doms = sandbox.pi_domains("deepseek/deepseek-v4-pro", tmp_path / "auth.json")
+    assert "api.deepseek.com" in doms and "api.anthropic.com" in doms
+    assert sandbox.pi_domains(None, None) == ["api.deepseek.com"]

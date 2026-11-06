@@ -169,6 +169,8 @@ def _auto_allowed(atype: str, payload: dict) -> tuple[bool, str]:
     prefix = policy.git_policy()["auto_branch_prefix"]
     if not branch.startswith(prefix) or len(branch) <= len(prefix):
         return False, f"只有 {prefix}<主题> 分支可以自动提交/推送，{branch} 需要你批准"
+    if atype == "git_commit" and branch == current_branch(repo_dir):
+        return False, f"你的工作区正检出着 {branch}：自动提交会动你的暂存区并在你的目录里运行 hooks，需要你批准"
     if atype == "git_commit" and repo_hooks(repo_dir) and not hooks_sandboxable():
         return False, f"仓库配置了 git hooks（{', '.join(repo_hooks(repo_dir))}），这台机器上没法在沙箱里运行它们：要你批准后再提交"
     if atype == "git_commit":
@@ -244,6 +246,8 @@ def commit(payload: dict, *, human_approved: bool = False) -> dict:
             raise RuntimeError(f"refusing to commit a credential/cache/leftover-like path: {p}")
     files = _check_commit_files(repo_dir, paths)
     branch = (payload.get("branch") or "").strip()
+    if not human_approved and (not branch or branch == current_branch(repo_dir)):
+        raise RuntimeError("an automatic commit never touches the user's own checkout: needs approval")
     if branch:
         if not valid_branch(branch):
             raise RuntimeError(f"not a plain branch name: {branch}")
@@ -379,7 +383,8 @@ def _commit_with_hooks(repo_dir: Path, branch: str, files: list[str], message: s
         c = git(run_dir, "clone", "--quiet", "--shared", "--no-checkout", "--", str(repo_dir), str(work), extra=NO_REPO_CODE)
         if c.returncode != 0:
             return {"done": False, "details": f"无法建立临时副本：{c.stderr[-400:]}"}
-        for key in ("user.name", "user.email", "core.hooksPath", "commit.gpgsign"):
+        git(work, "config", "commit.gpgsign", "false")   # signing keys are out of the sandbox's reach on purpose
+        for key in ("user.name", "user.email", "core.hooksPath"):
             v = git(repo_dir, "config", "--get", key).stdout.strip()
             if v:
                 git(work, "config", key, v)
@@ -396,7 +401,13 @@ def _commit_with_hooks(repo_dir: Path, branch: str, files: list[str], message: s
         _copy_into(repo_dir, work, files)
         for d in DEP_DIRS:   # the user's installed dependencies, readable but not writable inside the sandbox
             if (repo_dir / d).is_dir() and not (work / d).exists():
-                os.symlink(repo_dir / d, work / d)
+                try:
+                    os.symlink(repo_dir / d, work / d, target_is_directory=True)
+                except OSError:   # Windows without symlink rights: hooks run without them
+                    pass
+        hp = git(repo_dir, "config", "--get", "core.hooksPath").stdout.strip()
+        if hp and not os.path.isabs(os.path.expanduser(hp)) and (repo_dir / hp).is_dir() and not (work / hp).exists():
+            shutil.copytree(repo_dir / hp, work / hp, symlinks=True)   # e.g. husky v9's generated, git-ignored .husky/_
         logs = run_dir / "logs"
         logs.mkdir()
         spec = type("S", (), {"allow_network": True, "net_allow": []})()
@@ -417,6 +428,16 @@ def _commit_with_hooks(repo_dir: Path, branch: str, files: list[str], message: s
         sha = git(work, "rev-parse", "HEAD", extra=NO_REPO_CODE).stdout.strip()
         if sha == base:
             return {"done": True, "details": f"分支 {branch} 上这些文件已经是最新，没有新的提交", "commit": base[:12], "branch": branch}
+        # Hooks ran agent-written code: take back only one commit on top of `base` that touches the listed files.
+        parents = git(work, "rev-list", "--parents", "-n", "1", sha, extra=NO_REPO_CODE).stdout.split()[1:]
+        changed = [p for p in git(work, "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", base, sha,
+                                  extra=NO_REPO_CODE).stdout.split("\0") if p]
+        stray = sorted(set(changed) - set(files))
+        bad = [p for p in changed if NEVER_COMMIT.search(p)]
+        if parents != [base] or stray or bad:
+            why = ("提交的父提交不对" if parents != [base] else
+                   f"hooks 多提交了没列出的文件：{stray[:10]}" if stray else f"含凭据/缓存类文件：{bad[:10]}")
+            return {"done": False, "details": f"hooks 产生的提交不符合要求，未写入（{why}）"}
         f = git(repo_dir, "fetch", "--quiet", "--no-tags", "--", str(work), sha)
         if f.returncode != 0:
             return {"done": False, "details": f"无法取回提交：{f.stderr[-400:]}"}

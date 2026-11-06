@@ -229,7 +229,7 @@ def _run_once(prompt: str, *, purpose: str, route: str | None = None, executor: 
               output_schema: dict | None = None, model: str | None = None, timeout_s: int | None = None,
               add_dirs: list[Path] | None = None, allow_network: bool = True, allow_connectors: bool = False,
               system_prompt: str | None = None, max_budget_usd: float | None = None,
-              check_budget: bool = True, net_allow: list[str] | None = None) -> tuple[str, RunResult]:
+              check_budget: bool = True, net_allow: list[str] | None = None, net_defaults: bool = True) -> tuple[str, RunResult]:
     cfg = load_config()
     name = executor
     if not executor_enabled(name):
@@ -287,7 +287,7 @@ def _run_once(prompt: str, *, purpose: str, route: str | None = None, executor: 
             run_id=run_id, prompt=prompt, cwd=Path(cwd), log_dir=log_dir, purpose=purpose, sandbox=sandbox,  # type: ignore[arg-type]
             output_schema=output_schema, timeout_s=int(timeout_s or cfg.get(f"executors.{name}.timeout_seconds", 1200)),
             model=model, add_dirs=list(add_dirs or []), allow_network=allow_network, allow_connectors=allow_connectors,
-            net_allow=list(net_allow or []),
+            net_allow=list(net_allow or []), net_defaults=net_defaults,
             max_budget_usd=budget_cap, system_prompt=system_prompt, on_pid=on_pid,
         )
         with _global_slot(), _slot(name):

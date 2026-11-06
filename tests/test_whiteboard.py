@@ -418,12 +418,12 @@ def test_blocked_domains_become_a_suggestion_when_the_agent_did_not_ask(git_env)
     from awos.hitl import outbox
     task = _task_with(level=3)
     db.add_run_event("run_d", "network_denied", None, {"hosts": ["files.example.net", "127.0.0.1:8765", "files.example.net"]})
-    ids = outbox.create_from_result(task, "run_d", {"proposed_actions": []})
+    assert outbox.create_from_result(task, "run_d", {"status": "completed", "proposed_actions": []}) == []   # done anyway: no nagging
+    ids = outbox.create_from_result(task, "run_d", {"status": "blocked", "proposed_actions": []})
     (a,) = [db.get_approval(i) for i in ids]
     assert a["action_type"] == "grant_network" and a["payload"]["domains"] == ["files.example.net"]
     assert "系统观察到" in a["context_md"]
-    assert outbox.create_from_result(task, "run_d", {"proposed_actions": [{"type": "grant_network", "title": "x", "description": "",
-                                                                          "payload_json": json.dumps({"domains": ["a.example.net"]})}]})
+    assert outbox.create_from_result(task, "run_d", {"status": "blocked", "proposed_actions": []}) == []     # asked once is enough
 
 
 def test_branch_hooks_never_run_outside_the_sandbox(git_env, tmp_path):
@@ -448,3 +448,30 @@ def test_branch_hooks_never_run_outside_the_sandbox(git_env, tmp_path):
     out = gitops.commit({"repo": str(r), "branch": "agent/p", "paths": ["a.txt"], "message": "m"})
     assert out["done"], out
     assert not marker.exists()                                  # the trusted-side checkout ran no branch hook
+
+
+def test_automatic_commits_never_touch_the_users_checkout(git_env):
+    from awos import repo as db
+    from awos.hitl import gitops
+    r, _, _ = _repo_with_remote(git_env)
+    _sh(r, "switch", "-q", "-c", "agent/here")                # the user is working on an agent branch themselves
+    (r / "a.txt").write_text("u", encoding="utf-8")
+    for payload in ({"repo": str(r), "branch": "agent/here", "paths": ["a.txt"], "message": "m"},
+                    {"repo": str(r), "paths": ["a.txt"], "message": "m"}):
+        (aid,) = _proposed("git_commit", payload)
+        assert db.get_approval(aid)["status"] == "pending"
+        try:
+            gitops.commit(payload)
+            raise AssertionError("an automatic commit must not run in the user's checkout")
+        except RuntimeError as e:
+            assert "needs approval" in str(e)
+    assert gitops.commit({"repo": str(r), "paths": ["a.txt"], "message": "m"}, human_approved=True)["done"]
+
+
+def test_what_hooks_produce_is_checked_before_it_is_taken(git_env):
+    from awos.hitl import gitops
+    r, _, _ = _repo_with_remote(git_env)
+    _hook(r, "pre-commit", 'echo SECRET=1 > .env.local && git add -f .env.local; echo extra > extra.txt && git add extra.txt')
+    (r / "a.txt").write_text("h", encoding="utf-8")
+    out = gitops.commit({"repo": str(r), "branch": "agent/x2", "paths": ["a.txt"], "message": "m"})
+    assert not out["done"] and "没列出的文件" in out["details"] and _sh(r, "branch", "--list", "agent/x2") == ""
