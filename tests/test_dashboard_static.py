@@ -710,3 +710,19 @@ def test_projects_api_contract_the_ui_reads(client):
     assert made["project"]["name"] == "新项目" and any(x["key"] == "新项目" for x in client.get("/api/projects").json()["projects"])
     gone = client.post(f"/api/topics/{enc}/project", json={"project_key": None}, headers=H).json()
     assert gone["ok"] is True and gone["project"] is None and client.get(f"/api/topics/{enc}").json()["project"] is None, "unlink = 不属于任何项目"
+
+
+def test_glass_layer_is_loaded_last_and_respects_accessibility_preferences():
+    """The macOS-style material/motion layer overrides the base system, so it must come last; it needs solid fallbacks."""
+    imports = re.findall(r'@import url\("([^"]+)"\)', (DASH / "style.css").read_text(encoding="utf-8"))
+    assert imports[-1] == "css/glass.css" and (DASH / imports[-1]).is_file()
+    css = (DASH / "css" / "glass.css").read_text(encoding="utf-8")
+    assert "prefers-reduced-transparency" in css and "prefers-reduced-motion" in css and "@supports not" in css
+    assert "backdrop-filter" in css and "@keyframes flow-in" in css
+
+
+def test_overview_shows_the_whiteboard_and_cascade_runs_only_on_navigation():
+    overview = (DASH / "js" / "views" / "overview.js").read_text(encoding="utf-8")
+    assert "/whiteboard" in overview and "add-rule" in overview and "whiteboardCard(wb)" in overview
+    shell = (DASH / "js" / "shell.js").read_text(encoding="utf-8")
+    assert "if (initial) playFlow(el);" in shell        # a live (SSE) refresh must not replay the entrance animation

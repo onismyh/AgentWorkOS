@@ -73,6 +73,15 @@ def test_whiteboard_is_editable_from_the_context_api_and_listed_first(client):
     assert [f["key"] for f in client.get("/api/context").json()["groups"]["rule"]] == ["沟通"]
 
 
+def test_whiteboard_endpoint_lists_the_rules_for_the_workbench(client):
+    from awos.brain import whiteboard
+    assert client.get("/api/whiteboard").json()["rules"] == []
+    whiteboard.ensure_defaults()
+    d = client.get("/api/whiteboard").json()
+    assert d["title"].startswith("白板") and [r["key"] for r in d["rules"]] == ["Git 交付权限", "交付时清理中间产物"]
+    assert all(r["value"] and r["id"] for r in d["rules"])
+
+
 # --------------------------------------------------------------------------- git rule
 
 

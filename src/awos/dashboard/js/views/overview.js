@@ -1,7 +1,8 @@
 // 总览: KPI cards with sparklines, what needs you, pipeline, autonomy mix, agent activity, cost, sensors, keywords.
 import { h, raw, setHTML, $, enc } from '../core/html.js';
-import { api, apiOpt } from '../core/api.js';
-import { ACTS } from '../core/acts.js';
+import { api, apiOpt, post } from '../core/api.js';
+import { ACTS, FORMS } from '../core/acts.js';
+import { toast } from '../ui/overlay.js';
 import { S, cacheTask, cacheApproval } from '../core/state.js';
 import { pref } from '../core/store.js';
 import { go, setParams } from '../core/router.js';
@@ -30,11 +31,28 @@ function fallbackDash(ov) {
 }
 
 export async function load() {
-  const [dash0, inbox, ov, tc] = await Promise.all([loadDashboard(), api('/inbox'), api('/overview'), api('/tool-calls?limit=80').catch(() => ({ tool_calls: [] }))]);
+  const [dash0, inbox, ov, tc, wb] = await Promise.all([loadDashboard(), api('/inbox'), api('/overview'), api('/tool-calls?limit=80').catch(() => ({ tool_calls: [] })), apiOpt('/whiteboard')]);
   const dash = dash0 || fallbackDash(ov);
   S.dash = dash;
-  return { dash, inbox, ov, tc: tc.tool_calls || [] };
+  return { dash, inbox, ov, tc: tc.tool_calls || [], wb };
 }
+
+/** 白板: the standing rules every agent sees. Read-only here (the agents cannot edit it); managed on the 上下文 page. */
+function whiteboardCard(wb) {
+  const rules = wb?.rules || [];
+  const tile = (r) => h`<li class="wb-note"><div class="wb-k">${icon('pin', { size: 13 })}<b>${r.key}</b></div><p class="wb-v">${r.value}</p><span class="wb-w">${rel(r.updated_at)}更新</span></li>`;
+  const add = h`<details class="wb-add"><summary class="btn btn-secondary btn-sm">${icon('plus', { size: 14 })}<span class="btn-label">添加规则</span></summary>
+    <form class="wb-form" data-form="add-rule"><input class="input" name="key" placeholder="规则名（如：对外沟通）" required maxlength="80" aria-label="规则名"><textarea class="textarea" name="value" placeholder="规则内容，写给所有 Agent 看" required rows="2" maxlength="600" aria-label="规则内容"></textarea>${btn('写到白板', { variant: 'default', type: 'submit', size: 'sm', icon: 'check' })}</form></details>`;
+  return card({ title: '白板', icon: 'pin', desc: `所有 Agent 的提示词最前面都会带上这些规则 · 只有你能改 · ${rules.length} 条`, cls: 'wb',
+    actions: h`${add}${btn('管理', { href: '#/context', variant: 'ghost', size: 'sm', icon: 'arrow-right' })}`,
+    body: rules.length ? h`<ul class="wb-list">${rules.map(tile)}</ul>` : empty({ icon: 'pin', title: '白板还是空的', desc: '写下你希望所有 Agent 都遵守的规则，例如 git 权限、交付要求。' }) });
+}
+FORMS['add-rule'] = async (form) => {
+  const f = Object.fromEntries(new FormData(form).entries());
+  if (!f.key.trim() || !f.value.trim()) { toast('请填写规则名和内容', 'err'); return; }
+  await post('/context', { kind: 'rule', key: f.key.trim(), value: f.value.trim() });
+  toast('已写到白板，之后启动的 Agent 都会看到'); await S.refresh(true);
+};
 
 
 function delta(vals, { good = 'up', unit = '' } = {}) {
@@ -168,7 +186,7 @@ function activityCard(dash) {
   return card({ title: '实时动态', icon: 'history', cls: 'span-4', body, actions: btn('历史', { href: '#/history', size: 'sm', variant: 'ghost', icon: 'arrow-right' }), flush: true });
 }
 
-export function render({ dash, inbox, ov, tc }) {
+export function render({ dash, inbox, ov, tc, wb }) {
   const k = dash.kpis; const s = dash.series || {};
   const days = s.days || [];
   const costTotals = (s.cost || []).map((r) => r.total);
@@ -182,6 +200,7 @@ export function render({ dash, inbox, ov, tc }) {
       ${kpiCard({ label: '24h 失败', ic: 'circle-x', value: k.failures_24h, href: '#/errors', tone: k.failures_open ? 'crit' : '', foot: k.failures_open ? h`<span class="tone-crit-ink">${icon('circle-alert', { size: 12 })} ${k.failures_open} 项未恢复</span>` : k.failures_24h ? h`<span class="tone-good-ink">${icon('check', { size: 12 })} 均已自动恢复</span>` : h`<span class="tone-good-ink">${icon('check', { size: 12 })} 一切正常</span>`, spark: s.failures ? sparkline(s.failures, { labels: days, name: '失败次数' }) : '' })}
       ${kpiCard({ label: '今日花费', ic: 'dollar', value: usd(k.cost_today), href: '#/runs', foot: h`<span class="kpi-meter">${progress(budgetFrac, { tone: budgetFrac >= 0.9 ? 'crit' : budgetFrac >= 0.7 ? 'warn' : 'brand', label: `${Math.round(budgetFrac * 100)}% / ${usd(k.budget_daily)}` })}</span>`, spark: sparkline(costTotals, { labels: days, name: '花费', money: true }) })}
     </div>
+    ${whiteboardCard(wb)}
     <div class="grid12">
       ${needsYou(dash, inbox)}<div class="stack span-4">${funnelCard(dash)}${levelsCard(dash)}</div>
       ${costCard(dash)}${agentCard(dash, ov, tc)}

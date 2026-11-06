@@ -1113,6 +1113,13 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
             groups.setdefault(f["kind"], []).append(f)
         return {"kinds": FACT_KINDS, "groups": groups, "count": len(facts), "profile": _profile()}
 
+    @app.get("/api/whiteboard")
+    def whiteboard_get() -> dict:
+        """The standing rules every agent sees (shown on the 总览 page); edited through /api/context with kind=rule."""
+        from ..brain import whiteboard
+        return {"title": whiteboard.TITLE, "rules": [{k: f[k] for k in ("id", "key", "value", "source", "updated_at")}
+                                                     for f in whiteboard.rules()]}
+
     @app.post("/api/context", status_code=201)
     def context_add(body: FactBody) -> dict:
         key, value = body.key.strip(), body.value.strip()
