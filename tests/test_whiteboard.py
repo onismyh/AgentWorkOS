@@ -424,3 +424,27 @@ def test_blocked_domains_become_a_suggestion_when_the_agent_did_not_ask(git_env)
     assert "系统观察到" in a["context_md"]
     assert outbox.create_from_result(task, "run_d", {"proposed_actions": [{"type": "grant_network", "title": "x", "description": "",
                                                                           "payload_json": json.dumps({"domains": ["a.example.net"]})}]})
+
+
+def test_branch_hooks_never_run_outside_the_sandbox(git_env, tmp_path):
+    from awos.hitl import gitops
+    r, _, main = _repo_with_remote(git_env)
+    marker = tmp_path / "post-checkout-ran"
+    _sh(r, "switch", "-q", "-c", "agent/p")                    # the agent's branch carries its own hooks dir ...
+    (r / ".hooks").mkdir()
+    (r / ".hooks" / "post-checkout").write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    (r / ".hooks" / "post-checkout").chmod(0o755)
+    (r / ".hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (r / ".hooks" / "pre-commit").chmod(0o755)
+    _sh(r, "add", ".hooks")
+    _sh(r, "commit", "-qm", "hooks")
+    _sh(r, "switch", "-q", main)
+    _sh(r, "config", "core.hooksPath", ".hooks")              # ... and the repo points hooks at a path inside the tree
+    (r / ".hooks").mkdir(exist_ok=True)
+    (r / ".hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (r / ".hooks" / "pre-commit").chmod(0o755)
+    marker.unlink(missing_ok=True)
+    (r / "a.txt").write_text("p", encoding="utf-8")
+    out = gitops.commit({"repo": str(r), "branch": "agent/p", "paths": ["a.txt"], "message": "m"})
+    assert out["done"], out
+    assert not marker.exists()                                  # the trusted-side checkout ran no branch hook

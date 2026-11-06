@@ -206,6 +206,8 @@ def _check_commit_files(repo_dir: Path, paths: list[str]) -> list[str]:
 
 
 HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit")
+# For git commands AgentWorkOS runs itself (unsandboxed) inside a clone holding agent-written content.
+NO_REPO_CODE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 DEP_DIRS = ("node_modules", ".venv", "venv")   # untracked dependency dirs hooks usually need (linked in, read-only)
 
 
@@ -374,7 +376,7 @@ def _commit_with_hooks(repo_dir: Path, branch: str, files: list[str], message: s
     work = run_dir / repo_dir.name
     run_dir.mkdir(parents=True)
     try:
-        c = git(run_dir, "clone", "--quiet", "--shared", "--no-checkout", "--", str(repo_dir), str(work))
+        c = git(run_dir, "clone", "--quiet", "--shared", "--no-checkout", "--", str(repo_dir), str(work), extra=NO_REPO_CODE)
         if c.returncode != 0:
             return {"done": False, "details": f"无法建立临时副本：{c.stderr[-400:]}"}
         for key in ("user.name", "user.email", "core.hooksPath", "commit.gpgsign"):
@@ -386,8 +388,9 @@ def _commit_with_hooks(repo_dir: Path, branch: str, files: list[str], message: s
             for h in HOOKS:
                 if (src_hooks / h).is_file():
                     shutil.copy2(src_hooks / h, work / ".git" / "hooks" / h)
-        co = subprocess.run(["git", "-C", str(work), "checkout", "--quiet", "-B", branch, base], capture_output=True, text=True,
-                            timeout=600, env={**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}, **NO_WINDOW)
+        # trusted side, outside the sandbox: never run anything the branch brings (post-checkout hooks, fsmonitor)
+        co = subprocess.run(["git", *NO_REPO_CODE, "-C", str(work), "checkout", "--quiet", "-B", branch, base], capture_output=True,
+                            text=True, timeout=600, env={**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}, **NO_WINDOW)
         if co.returncode != 0:
             return {"done": False, "details": f"无法检出 {branch}：{co.stderr[-400:]}"}
         _copy_into(repo_dir, work, files)
@@ -411,7 +414,7 @@ def _commit_with_hooks(repo_dir: Path, branch: str, files: list[str], message: s
                 if pr.exit_code != 0:
                     tail = "\n".join(out)[-1200:] or pr.stderr_tail[-1200:]
                     return {"done": False, "details": f"git hooks 没通过（{' '.join(argv[-4:])[:80]}），未提交：\n{tail}"}
-        sha = git(work, "rev-parse", "HEAD").stdout.strip()
+        sha = git(work, "rev-parse", "HEAD", extra=NO_REPO_CODE).stdout.strip()
         if sha == base:
             return {"done": True, "details": f"分支 {branch} 上这些文件已经是最新，没有新的提交", "commit": base[:12], "branch": branch}
         f = git(repo_dir, "fetch", "--quiet", "--no-tags", "--", str(work), sha)
