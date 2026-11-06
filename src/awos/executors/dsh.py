@@ -21,6 +21,7 @@ from .base import EventSink, Executor, RunResult, RunSpec
 from .noderuntime import extract_json, node_exe, runtime_dir, runtime_secrets, schema_prompt
 
 DSH_ENTRY = Path("node_modules/@deepseek-ai/dsh/lib/bin.js")
+DSH_DATA_DIRS = ("sessions", "storages", "cache", "attachments", "llm-deepseek", "tmp")
 # bwrap-style profile args come first, then `--`, then the command: drop the former, exec the latter.
 PASSTHROUGH_RUNNER = ["/bin/sh", "-c", 'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; '
                       '[ "$#" -gt 0 ] || { echo "awos-runner: no command" >&2; exit 125; }; shift; exec "$@"', "awos-runner"]
@@ -171,13 +172,16 @@ class DshExecutor(Executor):
         parser = DshParser(on_event)
         home = prepare_home()
         cred = account_credentials()
-        writable = [home] + ([] if spec.sandbox == "read-only" else [spec.cwd])
+        # DSH may write its data (sessions, storages, caches, attachments); not its profile / patch layers (plugins,
+        # `!!js`), instructions (AGENTS.md ...), skills or .env: a run must not plant anything the next run would load.
+        data = [home / d for d in DSH_DATA_DIRS]
+        for d in data:
+            d.mkdir(parents=True, exist_ok=True)
+        writable = data + ([] if spec.sandbox == "read-only" else [spec.cwd])
         argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
                                     readable=[spec.cwd, *spec.add_dirs],
-                                    # its profile and home patch layers (plugins, `!!js`) and .env (credential fallback) stay as
-                                    # setup left them; DSH itself rewrites the profile's constant root file on every boot
-                                    readonly_within=[home / "profiles", home / "cordis.patch.yml", home / ".env"],
-                                    writable_files=[home / "profiles" / "headless" / "cordis.yml"],
+                                    # DSH rewrites its profile's constant root file on every boot
+                                    writable_files=[home / "profiles" / "headless" / "cordis.yml", home / ".anonymous-user-id"],
                                     own_files=[cred] if cred else [])
         pr = run_process(argv, cwd=spec.cwd, stdin_text=schema_prompt(spec.prompt, spec.output_schema),
                          env={**build_env(spec), **sb_env}, timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir,

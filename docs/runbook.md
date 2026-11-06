@@ -101,8 +101,8 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 | 所有执行器 | 只能写本次任务的工作区（只读任务不能写；Claude 的只读任务仍可写自己的草稿工作区）和私有临时目录 | 不能读凭据（`~/.ssh`、`~/.aws`、各 agent 的登录文件、`var/secrets.toml` 等）、AgentWorkOS 的数据（`var/`：数据库里的全部邮件、其他任务的工作区、运行日志、API token）和其他 agent 的历史（`~/.codex`、`~/.claude`、`~/.dsh`、`~/.pi`、邮件/信息）；本次任务的工作区和可读目录除外 | 见下 |
 | claude | Claude Code 自带沙箱：Bash 受上述限制，没有"不走沙箱"的后门（`allowUnsandboxedCommands=false`，沙箱起不来就失败）；Read/Edit 工具对凭据和 `var/` 里最敏感的文件（API token、数据库、日志、备份）另有拒绝规则 | | Bash 不能联网 |
 | codex | Codex 权限配置（`permissions.awos` + `default_permissions`），实测优先于用户配置里的 `sandbox_mode`；Codex 低于 0.167 时退回 `-s read-only/workspace-write` | | 命令不能联网 |
-| dsh | 整个进程套 Seatbelt；自己的配置层（`profiles/`、`cordis.patch.yml`、`.env`）只读，防止一次运行给下一次埋东西 | 自己的账号登录文件可读 | 不能连本机（127.0.0.1/::1），所以拿不到控制台的 token；直连 DeepSeek |
-| pi | 整个进程套 Seatbelt；只能写 `runtime/pi-home` 里的 `bin/`、`tmp/` 和两个缓存文件，设置、MCP 配置、扩展都只读；永远不用你自己的 `~/.pi/agent` | 自己的登录文件（如有）可读写 | 同 dsh |
+| dsh | 整个进程套 Seatbelt；`runtime/dsh-home` 里只有数据目录（sessions、storages、cache、attachments 等）可写，配置层、`AGENTS.md`、skills、`.env` 都只读，防止一次运行给下一次埋东西 | 自己的账号登录文件可读 | 不能连本机（127.0.0.1/::1），所以拿不到控制台的 token；不能连 ssh-agent、docker 等 unix socket（DNS 除外）；不传代理，直连 DeepSeek |
+| pi | 整个进程套 Seatbelt；只能写 `runtime/pi-home` 里的 `tmp/` 和两个缓存文件。工具目录 `bin/`（rg、fd 由 `awos setup` 预先下载）、设置、MCP 配置、扩展都只读；永远不用你自己的 `~/.pi/agent` | 自己的登录文件（如有，以链接方式接入）可读写 | 同 dsh |
 
 另外：
 - 套 Seatbelt 的 agent 不能发 AppleEvents、不能调 LaunchServices，所以 `osascript`、`open` 起不了沙箱外的程序。

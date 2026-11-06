@@ -226,6 +226,23 @@ def seed_pi_settings(log=print) -> None:
     log("    pi: runtime/pi-home/settings.json written")
 
 
+def fetch_pi_tools(log=print) -> None:
+    """Pi looks for rg / fd in runtime/pi-home/bin before PATH and downloads them there; agent runs may not write bin/,
+    so fetch them now (trusted, outside any sandbox)."""
+    from .executors import pi
+    from .executors.noderuntime import node_exe
+    node = node_exe()
+    mgr = runtime_dir("pi") / "node_modules" / "@earendil-works" / "pi-coding-agent" / "dist" / "utils" / "tools-manager.js"
+    if node is None or not mgr.is_file():
+        return
+    js = ("import(process.argv[1]).then(m => Promise.all([m.ensureTool('rg'), m.ensureTool('fd')]))"
+          ".then(r => { console.log(JSON.stringify(r)); process.exit(r.every(Boolean) ? 0 : 1); }, e => { console.error(e); process.exit(1); })")
+    env = {**os.environ, "PI_CODING_AGENT_DIR": str(pi.pi_home())}
+    cp = subprocess.run([str(node), "-e", js, mgr.as_uri()], capture_output=True, text=True, timeout=300, env=env,
+                        stdin=subprocess.DEVNULL, **NO_WINDOW)
+    log(f"    pi: rg / fd {'ready' if cp.returncode == 0 else 'not fetched (grep/find fall back to PATH): ' + (cp.stderr or cp.stdout)[-200:]}")
+
+
 def init_dsh_profile(log=print) -> None:
     """Create DSH's headless profile in runtime/dsh-home now (trusted, outside any sandbox): agent runs may not write it."""
     from .executors import dsh
@@ -249,6 +266,7 @@ def setup(*, install: bool = True, credentials: bool = True, only: list[str] | N
                 continue
             ok = install_runtime(name, spec, log=log) and ok
         seed_pi_settings(log)
+        fetch_pi_tools(log)
         init_dsh_profile(log)
     if credentials:
         log("==> credentials")

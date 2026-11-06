@@ -43,7 +43,8 @@ def pi_home() -> Path:
 
 def login_file() -> Path | None:
     """An existing Pi login setup pointed at ([pi] credentials), linked into pi-home as auth.json."""
-    p = runtime_secrets("pi").get("credentials")
+    sec = runtime_secrets("pi")
+    p = sec.get("credentials") or (Path(str(sec["agent_dir"])) / "auth.json" if sec.get("agent_dir") else None)  # older setups
     if not p:
         return None
     p = Path(os.path.expanduser(str(p)))
@@ -155,11 +156,11 @@ class PiExecutor(Executor):
         from . import sandbox
         home = prepare_home()
         auth = Path(os.path.realpath(home / "auth.json"))
-        # Pi may write its tool downloads, scratch and caches, and refresh its own login; not its settings, MCP config,
-        # extensions, prompts or skills (a run must not plant what the next run loads).
-        writable = [home / "bin", home / "tmp"] + ([] if spec.sandbox == "read-only" else [spec.cwd])
-        for d in writable[:2]:
-            d.mkdir(parents=True, exist_ok=True)
+        # Pi may write its scratch, caches and its own login (+ the lock it takes next to auth.json); not its tools (bin/:
+        # rg / fd are fetched by `awos setup`), settings, MCP config, extensions, prompts or skills: a run must not plant
+        # anything the next run would load or execute.
+        (home / "tmp").mkdir(parents=True, exist_ok=True)
+        writable = [home / "tmp", home / "auth.json.lock"] + ([] if spec.sandbox == "read-only" else [spec.cwd])
         argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
                                     readable=[spec.cwd, home, *spec.add_dirs],
                                     writable_files=[home / "models-store.json", home / "mcp.log"],

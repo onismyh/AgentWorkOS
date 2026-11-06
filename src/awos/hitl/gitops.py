@@ -8,11 +8,11 @@ requests (MR/PR), and every git action of a sensitive task (mail / notes / exter
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import stat
 import subprocess
+import uuid
 from pathlib import Path
 
 from ..brain import policy
@@ -234,7 +234,17 @@ def commit(payload: dict) -> dict:
             "branch": current_branch(repo_dir)}
 
 
-def _blob(repo_dir: Path, rel: str) -> tuple[str, str] | None:
+def _exec_mode(repo_dir: Path, base: str, rel: str, st: os.stat_result) -> str:
+    """100755/100644 from the file's exec bit, except where it means nothing (Windows, core.fileMode=false): then
+    keep the mode the path already has on the branch."""
+    trust = os.name != "nt" and git(repo_dir, "config", "--type=bool", "core.fileMode").stdout.strip() != "false"
+    if trust:
+        return "100755" if st.st_mode & 0o111 else "100644"
+    cur = git(repo_dir, "ls-tree", base, "--", rel, extra=_LIT).stdout.split(" ", 1)[0]
+    return cur if cur in ("100644", "100755") else "100644"
+
+
+def _blob(repo_dir: Path, rel: str, base: str) -> tuple[str, str] | None:
     """(mode, sha) of a working-tree entry written into the object store, with the clean filters `git add` would apply
     for that path (CRLF, LFS, ...); None if it is gone. Never follows a symlink: a link is stored as a link."""
     path = repo_dir / rel
@@ -249,7 +259,7 @@ def _blob(repo_dir: Path, rel: str) -> tuple[str, str] | None:
     elif stat.S_ISREG(st.st_mode):
         p = subprocess.run(["git", "-C", str(repo_dir), "hash-object", "-w", "--path", rel, "--", str(path)],
                            capture_output=True, timeout=300, **NO_WINDOW)
-        mode = "100755" if st.st_mode & 0o111 else "100644"
+        mode = _exec_mode(repo_dir, base, rel, st)
     else:
         raise RuntimeError(f"not a regular file or symlink: {path}")
     if p.returncode != 0:
@@ -270,7 +280,7 @@ def _commit_to_branch(repo_dir: Path, branch: str, files: list[str], message: st
         return {"done": False, "details": "仓库还没有任何提交，无法从 HEAD 新建分支"}
     tmp_dir = load_config().path("var") / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    index = tmp_dir / f"git-index-{os.getpid()}-{hashlib.sha1((str(repo_dir) + branch).encode()).hexdigest()[:8]}"
+    index = tmp_dir / f"git-index-{uuid.uuid4().hex}"
     env = {**os.environ, "GIT_INDEX_FILE": str(index)}
     run = lambda *a, **k: subprocess.run(["git", "-C", str(repo_dir), *a], capture_output=True, text=True,  # noqa: E731
                                         encoding="utf-8", errors="replace", timeout=300, env=env, **NO_WINDOW, **k)
@@ -279,7 +289,7 @@ def _commit_to_branch(repo_dir: Path, branch: str, files: list[str], message: st
         if r.returncode != 0:
             return {"done": False, "details": r.stderr[-600:]}
         for f in files:
-            entry = _blob(repo_dir, f)
+            entry = _blob(repo_dir, f, base)
             r = (run("update-index", "--add", "--cacheinfo", f"{entry[0]},{entry[1]},{f}") if entry
                  else run("update-index", "--force-remove", "--", f))
             if r.returncode != 0:
@@ -291,7 +301,7 @@ def _commit_to_branch(repo_dir: Path, branch: str, files: list[str], message: st
         if c.returncode != 0:
             return {"done": False, "details": c.stderr[-600:]}
         sha = c.stdout.strip()
-        u = run("update-ref", "-m", f"awos: {message.splitlines()[0][:80]}", ref, sha, tip or "0" * 40)
+        u = run("update-ref", "-m", f"awos: {message.splitlines()[0][:80]}", ref, sha, tip or "")   # "" = must not exist yet
         if u.returncode != 0:
             return {"done": False, "details": f"分支 {branch} 在提交期间被改动，未写入：{u.stderr[-400:]}"}
         note = (f"（直接提交到分支 {branch}{'' if tip else '（新建自当前 HEAD）'}，没有检出任何东西；"

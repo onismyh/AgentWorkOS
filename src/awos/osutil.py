@@ -62,7 +62,7 @@ def kill_process_tree(pid: int) -> None:
         pass
 
 
-_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
 _proxy_cache: tuple[float, dict[str, str]] | None = None
 
 
@@ -83,7 +83,7 @@ def system_proxy() -> dict[str, str]:
     """macOS: the System Settings HTTP(S) proxy as env vars, for CLIs that only honour HTTPS_PROXY (GUI apps use it
     automatically). Empty when the environment already sets a proxy, off macOS, or when none is configured."""
     global _proxy_cache
-    if not IS_MAC or any(os.environ.get(v) for v in _PROXY_VARS):
+    if not IS_MAC or any(os.environ.get(v) for v in PROXY_VARS):
         return {}
     if _proxy_cache and time.monotonic() - _proxy_cache[0] < 60:
         return _proxy_cache[1]

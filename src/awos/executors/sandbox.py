@@ -14,8 +14,9 @@ be configured tightly enough uses that one, and the others run under AgentWorkOS
 
 The `sandbox-exec` profile (Pi, DSH): allow by default, then take away writes outside the workspace / the agent's own
 state, reads of credentials, of AgentWorkOS's data and of other agents' histories, any connection to localhost (the
-dashboard API hands its token to whoever loads the page; no system proxy is injected for these agents), AppleEvents and
-LaunchServices (`osascript` / `open` would start programs outside the sandbox).
+dashboard API hands its token to whoever loads the page; no proxy is passed to these agents, their model APIs are reached
+directly), unix sockets other than DNS (ssh-agent, docker), AppleEvents and LaunchServices (`osascript` / `open` would
+start programs outside the sandbox).
 
 All executors also get a scrubbed environment (proc.child_env): credential-looking variables are dropped except the ones
 the executor needs for its own login.
@@ -78,15 +79,24 @@ def _filters(paths: list[str], files: list[str] = ()) -> str:
     return " ".join([*(f"(subpath {_q(p)})" for p in paths), *(f"(literal {_q(p)})" for p in files)])
 
 
+MDNS_SOCKET = "/private/var/run/mDNSResponder"   # DNS lookups go through this socket; every other unix socket is denied
+
+
+def _inside_private(paths: list[str]) -> list[str]:
+    """Only paths inside a private area need re-allowing; a parent of one (e.g. ~/Desktop holding var/) must not unlock it."""
+    priv = private_paths()
+    return [p for p in paths if any(p == q or p.startswith(q + os.sep) for q in priv)]
+
+
 def seatbelt_profile(*, writable: list[Path], readable: list[Path], writable_files: list[Path] = (),
-                     readonly_within: list[Path] = (), own_files: list[Path] = (), localhost_ports: list[int] = ()) -> str:
+                     readonly_within: list[Path] = (), own_files: list[Path] = ()) -> str:
     """The `sandbox-exec` profile for agents without a usable sandbox of their own. Seatbelt applies the last matching
     rule, so each narrower allow/deny comes after the broader one it refines:
       writes: nowhere, except /dev and `writable` dirs minus `readonly_within` (an agent's own code / config inside its
               state dir, so a run cannot plant something the next run would load), plus single `writable_files`
       reads:  not AgentWorkOS's data / other agents' histories, except `readable` (+ the writable ones)
               never credentials, except `own_files` (the agent's own login, read/write for token refresh)
-      no localhost except `localhost_ports` (an explicitly configured local proxy), no AppleEvents, no LaunchServices."""
+      no localhost and no unix sockets (ssh-agent, docker, ...) except DNS, no AppleEvents, no LaunchServices."""
     w_dirs = _uniq(writable)
     w_files = _uniq(writable_files)
     lines = ["(version 1)", "(allow default)", "(deny file-write*)",
@@ -97,7 +107,7 @@ def seatbelt_profile(*, writable: list[Path], readable: list[Path], writable_fil
     if w_files:                                   # single files, may sit inside a read-only area
         lines.append(f"(allow file-write* {_filters([], w_files)})")
     lines.append(f"(deny file-read* {_filters(private_paths())})")
-    back = _uniq([*readable, *writable])
+    back = _inside_private(_uniq([*readable, *writable]))
     if back or w_files:
         lines.append(f"(allow file-read* {_filters(back, w_files)})")
     lines.append(f"(deny file-read* file-write* {_filters(secret_paths())})")
@@ -110,23 +120,11 @@ def seatbelt_profile(*, writable: list[Path], readable: list[Path], writable_fil
         if parents:
             lines.append(f"(allow file-read-metadata {_filters([], parents)})")
     lines.append('(deny network-outbound (remote ip "localhost:*"))')
-    for port in localhost_ports:
-        lines.append(f'(allow network-outbound (remote ip "localhost:{int(port)}"))')
+    lines.append("(deny network-outbound (remote unix-socket))")
+    lines.append(f'(allow network-outbound (remote unix-socket (path-literal "{MDNS_SOCKET}")))')
     lines.append("(deny appleevent-send)")
     lines.append("(deny mach-lookup " + " ".join(f'(global-name "{n}")' for n in LAUNCH_SERVICES) + ")")
     return "\n".join(lines) + "\n"
-
-
-def _env_proxy_ports() -> list[int]:
-    """Local ports of a proxy the user set explicitly in the environment (the system proxy is not injected for
-    sandbox-exec'd agents: their model APIs are reachable directly)."""
-    from urllib.parse import urlsplit
-    ports = []
-    for v in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
-        u = urlsplit(os.environ.get(v) or "")
-        if u.hostname in ("127.0.0.1", "localhost", "::1") and u.port:
-            ports.append(u.port)
-    return sorted(set(ports))
 
 
 def wrap(argv: list[str], *, log_dir: Path, writable: list[Path], readable: list[Path] = (), writable_files: list[Path] = (),
@@ -140,8 +138,7 @@ def wrap(argv: list[str], *, log_dir: Path, writable: list[Path], readable: list
     tmp.mkdir(parents=True, exist_ok=True)
     profile = log_dir / "sandbox.sb"
     profile.write_text(seatbelt_profile(writable=[*writable, tmp], readable=[*readable, log_dir], writable_files=writable_files,
-                                        readonly_within=readonly_within, own_files=own_files,
-                                        localhost_ports=_env_proxy_ports()), encoding="utf-8")
+                                        readonly_within=readonly_within, own_files=own_files), encoding="utf-8")
     return [SANDBOX_EXEC, "-f", str(profile), *argv], {"TMPDIR": str(tmp) + os.sep}
 
 
@@ -152,8 +149,7 @@ def claude_settings(*, cwd: Path, read_only_dirs: list[Path]) -> dict:
     if not (IS_MAC or (os.name == "posix" and shutil.which("bwrap"))):
         return {}
     keep_ro = [_real(p) for p in read_only_dirs if _real(p) != _real(cwd)]
-    priv = private_paths()
-    back = [p for p in _uniq([cwd, *read_only_dirs]) if any(p == q or p.startswith(q + os.sep) for q in priv)]
+    back = _inside_private(_uniq([cwd, *read_only_dirs]))
     return {"sandbox": {
         "enabled": True,
         "failIfUnavailable": True,            # never fall back to running shell commands unconfined

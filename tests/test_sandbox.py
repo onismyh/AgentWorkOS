@@ -72,19 +72,23 @@ def test_secret_and_private_paths():
     assert os.path.realpath(load_config().path("var")) in priv and os.path.join(home, ".codex") in priv
 
 
-def test_seatbelt_profile_shape(tmp_path):
-    prof = sandbox.seatbelt_profile(writable=[tmp_path / "a b"], readable=[tmp_path / "r"], writable_files=[tmp_path / "f"],
-                                    readonly_within=[tmp_path / "a b" / "profiles"], own_files=[Path("/x/\"q")],
-                                    localhost_ports=[7897])
+def test_seatbelt_profile_shape(tmp_path, monkeypatch):
+    var = os.path.realpath(tmp_path / "var")
+    monkeypatch.setattr(sandbox, "private_paths", lambda: [var])
+    prof = sandbox.seatbelt_profile(writable=[tmp_path / "a b"], readable=[tmp_path, Path(var) / "ws"],
+                                    writable_files=[tmp_path / "a b" / "profiles" / "root.yml"],
+                                    readonly_within=[tmp_path / "a b" / "profiles"], own_files=[Path("/x/\"q")])
     lines = prof.splitlines()
     assert lines[:3] == ["(version 1)", "(allow default)", "(deny file-write*)"]
     assert f'(subpath "{os.path.realpath(tmp_path / "a b")}")' in prof and '"/x/\\"q"' in prof
     order = [next(i for i, l in enumerate(lines) if l.startswith(p)) for p in
-             ("(allow file-write*", "(deny file-write* (subpath", "(deny file-read* ", "(allow file-read* ", "(deny file-read* file-write*",
-              "(allow file-read* file-write*", '(deny network-outbound (remote ip "localhost:*"))')]
+             ("(allow file-write* (subpath", "(deny file-write* (subpath", "(allow file-write* (literal", "(deny file-read* ",
+              "(allow file-read* ", "(deny file-read* file-write*", "(allow file-read* file-write*",
+              '(deny network-outbound (remote ip "localhost:*"))', "(deny network-outbound (remote unix-socket))")]
     assert order == sorted(order)                       # each narrower rule follows the broader one (last match wins)
-    assert '(allow network-outbound (remote ip "localhost:7897"))' in prof and "(deny appleevent-send)" in prof
-    assert "launchservicesd" in prof
+    reallow = next(l for l in lines if l.startswith("(allow file-read* ") and "file-write" not in l)
+    assert os.path.join(var, "ws") in reallow and f'(subpath "{os.path.realpath(tmp_path)}")' not in reallow   # a parent of var/ never unlocks it
+    assert "localhost:7897" not in prof and "mDNSResponder" in prof and "(deny appleevent-send)" in prof and "launchservicesd" in prof
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS Seatbelt")
@@ -105,6 +109,11 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
     import threading
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    import socket as _socket
+    sock_path = Path(f"/tmp/awos-t-{os.getpid()}.sock")
+    us = _socket.socket(_socket.AF_UNIX)
+    us.bind(str(sock_path))
+    us.listen(1)
     ws, logs, outside = var / "workspaces" / "mine", tmp_path / "logs", tmp_path / "outside.txt"
     ws.mkdir()
     logs.mkdir()
@@ -118,6 +127,7 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
                          ("own_login", lambda: open({str(own)!r}, "w").write("{{}}")),
                          ("awos_db", lambda: open({str(var / "awos.db")!r}).read()),
                          ("localhost", lambda: socket.create_connection(("127.0.0.1", {srv.server_port}), timeout=3).close()),
+                         ("unix_socket", lambda: socket.socket(socket.AF_UNIX).connect({str(sock_path)!r})),
                          ("tmp", lambda: tempfile.NamedTemporaryFile(delete=False).write(b"x"))]:
             try:
                 fn(); res[name] = True
@@ -131,8 +141,10 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
     pr = proc.run_process(argv, cwd=ws, stdin_text=None, timeout_s=60, env=env, on_stdout=lines.append)
     assert pr.exit_code == 0, pr.stderr_tail
     srv.shutdown()
+    us.close()
+    sock_path.unlink(missing_ok=True)
     assert lines[-1] == str({"inside": True, "outside": False, "secret": False, "own_login": True, "awos_db": False,
-                             "localhost": False, "tmp": True})
+                             "localhost": False, "unix_socket": False, "tmp": True})
     assert not outside.exists() and (ws / "in.txt").exists()
 
 
@@ -272,3 +284,9 @@ def test_pi_never_uses_the_users_agent_dir(tmp_path, monkeypatch):
     home = pi.prepare_home()
     assert home == tmp_path / "pi-home" and os.path.realpath(home / "auth.json") == os.path.realpath(login)
     assert pi.build_env(_spec(tmp_path))["PI_CODING_AGENT_DIR"] == str(home)
+
+
+def test_agents_without_localhost_get_no_proxy_and_authenticated_proxies_survive(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://me:pw@127.0.0.1:7897")
+    assert proc.child_env()["HTTPS_PROXY"] == "http://me:pw@127.0.0.1:7897"      # claude / codex still reach their APIs
+    assert "HTTPS_PROXY" not in proc.child_env(proxy=False)                       # pi / dsh: no localhost, so no local proxy

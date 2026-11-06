@@ -47,14 +47,17 @@ def child_env(extra: dict[str, str] | None = None, *, keep_secrets: tuple[str, .
     """Inherited env minus our own AWOS_* settings and minus credential-looking variables (by name, or a URL with an
     embedded password; except the `keep_secrets` prefixes), forced UTF-8 / no colour, the macOS system proxy (unless
     `proxy=False`), then caller overrides."""
+    from ..config import load_config
+    from ..osutil import PROXY_VARS, system_proxy
     keep = tuple(p.upper() for p in keep_secrets)
     env = {k: v for k, v in os.environ.items()
            if not k.upper().startswith("AWOS_")
-           and (not (_SECRETISH.search(k) or _URL_CREDS.search(v or "")) or k.upper().startswith(keep))}
+           and (not (_SECRETISH.search(k) or (_URL_CREDS.search(v or "") and k not in PROXY_VARS)) or k.upper().startswith(keep))}
     env.update(PYTHONUTF8="1", NO_COLOR="1")
-    from ..config import load_config
-    from ..osutil import system_proxy
-    if proxy and load_config().get("network.use_system_proxy", True):
+    if not proxy:   # an agent that may not reach localhost gets no (local) proxy either
+        for k in (*PROXY_VARS, "NO_PROXY", "no_proxy"):
+            env.pop(k, None)
+    elif load_config().get("network.use_system_proxy", True):
         env.update(system_proxy())
     env.update({str(k): str(v) for k, v in (extra or {}).items()})
     return env
