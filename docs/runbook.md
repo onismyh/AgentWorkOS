@@ -56,7 +56,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\service-uninstall.ps
 
 ### 2.1 macOS
 
-前置只有 git 和 curl。`install.sh` 一键装好其余全部，可重复执行：
+前置只有 git 和 curl（Claude Code 按官方方式自行安装并登录）。`install.sh` 一键装好其余全部，可重复执行：
 
 1. 没有 uv 就装到 `~/.local/bin`；建 `.venv`（Python 3.13）并装依赖；建 `var/` 子目录。
 2. Node ≥ 22.19：优先 `runtime/node`，其次 PATH 上的 `node`；都没有就从 nodejs.org 下载便携 Node LTS 到 `runtime/node`（按 SHASUMS256 校验），不动系统 Node。

@@ -71,9 +71,11 @@ install_portable_node() {
   case "$(uname -s)" in Darwin) os=darwin ;; Linux) os=linux ;; *) warn "unsupported OS for portable Node"; return 1 ;; esac
   case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; *) warn "unsupported CPU for portable Node"; return 1 ;; esac
   plat="$os-$arch"
+  local key="$plat"   # index.json "files" key: osx-arm64-tar / linux-x64 (the tarball itself is node-vX-darwin-arm64.tar.gz)
+  [ "$os" = darwin ] && key="osx-$arch-tar"
   ver="$(curl -fsSL https://nodejs.org/dist/index.json | "$VENV_PY" -c "
 import json, sys
-rel = [r for r in json.load(sys.stdin) if r['version'].startswith('v$NODE_MAJOR.') and r.get('lts') and '$plat' in ' '.join(r['files'])]
+rel = [r for r in json.load(sys.stdin) if r['version'].startswith('v$NODE_MAJOR.') and r.get('lts') and '$key' in r['files']]
 print(rel[0]['version'] if rel else '')")"
   [ -n "$ver" ] || { warn "no Node v$NODE_MAJOR LTS build for $plat"; return 1; }
   tmp="$(mktemp -d)"
