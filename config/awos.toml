@@ -64,13 +64,15 @@ max_concurrent = 2
 timeout_seconds = 1500
 
 [routing]
-# readonly: L1/L2 analysis on non-personal categories (dev/research/learning/data/pm) -> cheap DeepSeek executors first
-readonly = ["dsh", "pi", "codex", "claude"]
-# write: L3-L5 work in non-personal categories. Pi has no sandbox of its own, so it is not here (see executors.pi.allow_write).
-write = ["codex", "dsh", "claude"]
-# Which categories use the cheap routes above (hand-off order = list order). Mail-derived tasks never go to pi/dsh.
-cheap_readonly_categories = ["dev", "research", "learning", "data", "pm", "doc", "writing", "system", "other"]
-cheap_write_categories = ["dev", "research", "learning", "data", "pm", "system", "other"]
+# Task work is routed by IMPORTANCE x DIFFICULTY (engine/router.py): the tier decides who goes first; explanations are kept in
+# task.meta.routing and shown on the task page. Pi has no sandbox of its own, so it only gets read-only work (executors.pi.allow_write).
+#   economy  = routine, low-stakes work       -> cheap DeepSeek executors first (dsh / pi), codex and claude as the safety net
+#   standard = ordinary work                  -> codex first (subscription, no marginal cost), dsh next
+#   premium  = hard or important work         -> claude / codex first; the cheap executors only as a last resort
+# Personal matters: only the executors already trusted with mail/private content (codex, claude). Mail-derived tasks always are.
+private_categories = ["comms", "career", "admin", "schedule"]
+# Work whose result reaches other people counts as important from L3 up.
+high_stakes_categories = ["comms", "career", "admin", "schedule"]
 verify = ["dsh", "pi", "codex", "claude"]
 # topic recaps contain the user's mail/repo context: only the executors already trusted with it (Codex is free per run)
 brief = ["codex", "claude"]
@@ -92,6 +94,26 @@ career = ["codex", "claude"]
 learning = ["codex", "claude"]
 system = ["codex", "claude"]
 other = ["codex", "claude"]
+
+[routing.tiers.economy]
+readonly = ["dsh", "pi", "codex", "claude"]
+write = ["dsh", "codex", "claude"]
+[routing.tiers.standard]
+readonly = ["codex", "dsh", "pi", "claude"]
+write = ["codex", "dsh", "claude"]
+[routing.tiers.premium]
+readonly = ["claude", "codex", "dsh", "pi"]
+write = ["claude", "codex", "dsh"]
+# In the standard and premium tiers the executor that is best at the category goes first (a triage hint is a soft preference).
+[routing.affinity]
+codex = ["dev", "data", "system", "research"]
+claude = ["writing", "doc", "comms", "career", "pm", "schedule", "admin"]
+
+[guardian]
+# Once a day (Beijing time, from this hour) every project's health is checked; a project that is at risk or stalled gets one
+# read-only analysis task (what is it stuck on, what is the smallest next step). At most 3 per day, a week of quiet per project.
+enabled = true
+hour = 11
 
 [budget]
 daily_usd = 15.0                       # pay-per-use executors (claude, pi, dsh share it); hard stop when exceeded. Raised from 8 on the user's request

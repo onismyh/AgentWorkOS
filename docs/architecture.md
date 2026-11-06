@@ -83,8 +83,17 @@ inbox ─triage─► triaged ─(自动启动 or 用户接受)─► ready ─c
 1. **类别上限**：comms / admin 等最多 L4（必须由人发出）；system / dev / research / doc 可以到 L5。
 2. **工具能力**：需要的执行器、连接器或凭据不可用 → 降级（例如没有 IMAP 就无法读学校邮件）。
 3. **权限**：需要写入的目录不在 `writable_roots` → 最多 L3（只能在工作区里产出）。
-4. **敏感动作**：`SENSITIVE_ACTIONS`（发邮件、发消息、发布、push、删除、花钱、写日历/Notion、回写项目目录）**不论等级都进 Outbox**。
+4. **敏感动作**：`SENSITIVE_ACTIONS`（发邮件、发消息、发布、push、开 MR/PR、删除、花钱、写日历/Notion、回写项目目录）**不论等级都进 Outbox**。唯一的例外是白板上的 git 规则（见下）。
 5. **预算**：当日预算或单任务预算用尽 → 生成 `budget` 审批。
+
+### 白板（共同规则）与 git 规则
+
+白板 = 上下文页最顶部的 `rule` 类条目（`brain/whiteboard.py`，pinned，只有用户能改，Agent 写入会被 `agent_write_fact` 拒绝）。它在每个 Agent 提示词（`context_brief`）的最前面，不受长度截断，同时写进 `profile.md`。内置两条，首次启动时写入一次，之后归用户所有（改了保留，删了不会再补）：
+
+- **Git 交付权限**：Agent 默认可以 commit 并 push 到本地/远端**分支**，不需要批准；不能动默认分支（main/master 与仓库的 `origin/HEAD`），不能 force-push，不能改写历史；**发起或合并 MR/PR 必须先告诉用户**。
+- **交付时清理中间产物**：交付只留最终文件，不留临时脚本、草稿、日志、截图、缓存、重复/备份副本。
+
+落地方式（`hitl/gitops.py`）：Agent 仍然不能直接跑 git 写命令，而是提议 `git_commit` / `git_push` / `open_mr`，由系统执行。`create_from_result` 对 `git_commit` / `git_push` 调用 `gitops.auto_allowed`：目标是非受保护的普通分支（不是 refspec、没有 `+`、远端名合法）就直接放行（审批记录 `decided_via=auto`，仍可在 Outbox 里回看），`git_commit` 带 `branch` 时系统会基于当前 HEAD 新建并切换到该分支再提交；受保护分支或可疑参数照旧进 Outbox（风险标 high）。执行前再核对一次，所以自动放行绝不能解锁默认分支。`open_mr`（`gh pr create`）永远需要用户批准，系统没有“合并”动作。提交还会拒绝凭据、缓存和 `*.bak` / `*.tmp` / `*.orig` 之类的残留文件。清理规则靠提示词（执行 + 质检）和提交过滤把关，不会自动删除工作区文件。`config/policy.toml` 的 `[git]` 可以关掉自动放行（`auto_branch_actions = false`）或增加受保护分支。
 
 ## 5. 执行层（`executors/`）
 
@@ -103,6 +112,17 @@ inbox ─triage─► triaged ─(自动启动 or 用户接受)─► ready ─c
 | internal | Python 函数 | 确定性动作（复制文件、apply、发 webhook） |
 
 **执行结果合同**（`brain/schemas.py::EXECUTE_SCHEMA`）：`status`、`summary`、`deliverables[]`、`verification{}`、`proposed_actions[]`、`decisions_needed[]`、`subtasks[]`、`followups[]`、`context_updates[]`。其中 `proposed_actions` 和 `decisions_needed` 会自动转成 Outbox 条目；`subtasks` 会生成子任务 DAG。
+
+
+### 任务分配（`engine/router.py`）
+
+谁来干一个任务，看三件事（理由写进 `task.meta.routing`，任务页“分配依据”里能看到）：
+
+- **重要性**：P0、3 天内截止、或结果会交到别人手里（comms/career/admin/schedule 的 L3 以上）算“重要”；P3 算“不急”；其余一般。
+- **难度**：分诊给的 `difficulty`（easy/medium/hard）优先，否则按 L 等级、是否要改代码或数据、材料多少估；失败过两次或返工过都会升一档（升级链）。
+- **内容敏感度**：含邮件原文或个人事务类别（`routing.private_categories`）只交给 Codex / Claude，DeepSeek 通道（pi / dsh）永远拿不到；验证者同理。
+
+重要性 × 难度 → 档位：**经济档**（例行、不急）先 dsh / pi，再 codex / claude 兜底；**标准档**先 codex（订阅制，没有边际成本）再 dsh；**高级档**（难或重要）先 claude / codex，便宜的只做最后选择。每档的顺序在 `config/awos.toml` 的 `[routing.tiers.*]`，只读分析和动手写分开配（pi 没有沙箱，只做只读）。标准档和高级档里，该类别最擅长的执行器排前面（`[routing.affinity]`），分诊的 `executor_hint` 只是软建议（经济档不采纳）；用户自己在任务里指定的执行器永远排第一（`meta.executor_pinned`），但仍受敏感度限制。今日额度用完的执行器排到最后，用到 85% 以上且任务不重要时后移。该档位没有可用执行器时退回类别默认路线 `routing.<category>`（后台的分诊 / 规划 / 简报等仍用这些路线，只交给 codex / claude）。执行失败后的自动切换沿用同一个顺序。重要的 L3 工作和所有 L4 / L5 工作会再让另一个（优先便宜的）执行器独立质检。
 
 ## 6. 调度与可靠性（`engine/`）
 
@@ -131,6 +151,16 @@ inbox ─triage─► triaged ─(自动启动 or 用户接受)─► ready ─c
 ## 9. 可观测性：Dashboard（`api/` + `dashboard/`）
 
 页面：总览（健康状况、预算、队列）、Inbox、任务（列表 / 树状 DAG / 详情）、Outbox、运行（实时日志 + 工具调用）、工具调用记录、异常、交付物、上下文、传感器、历史（审计事件）。
+
+
+**项目时间线与里程碑**（看板顶部切换“任务看板 | 项目时间线”，`#/board?mode=timeline&project=<key>`；`api/timeline.py`）：按项目回答三个问题——Agent 给你干了什么、干成什么样、你人为干预了什么。数据全部在读取时从 tasks、runs、approvals、artifacts、审计 events 和上下文事实推出，只有 `milestones` 表是自己的。任务归项目的顺序：话题关联，其次 `tasks.project` 和父任务，最后项目名特征词匹配（其余汇成“未归类”）。页面从上到下：统计（Agent 做了 / 完成 / 你干预了 / 等你处理 / 花费）、里程碑横轴、任务流程图（纯内联 SVG：任务方框 + 你拍板的节点，点方框开任务）、按天分组的动态流（你的操作蓝色加“你”头像，Agent 事件带各自执行器头像；筛选“全部 / Agent 做的 / 我干预的 / 异常”；事件只带短摘要不放原始日志，图片交付物显示缩略图）。你的干预是一等公民：审批、选择、拒绝、返工、取消、忽略、验收、推迟、新建任务、重新来过、改归属、里程碑编辑。里程碑 = 你手动设定的行（增删改走 `/api/milestones`）加自动推出的截止日期和 L4/L5 完成的交付（标“自动”，不可编辑）；已过目标日期仍是“计划中”的算逾期。
+
+
+**看管所有项目**：项目时间线默认页是“项目巡检”——每个项目一行，只给健康状态（有风险 / 要你处理 / 停滞 / 正常 / 暂无动静，规则是 `api/timeline.py` 里的纯函数）、一句话现状、最近一件有意义的事和下一个节点；点开才看“要你处理的事”和近期要点，统计、流程图、完整动态都折叠。后台 `engine/guardian.py` 每天（北京时间 11 点后，`[guardian]`）检查一遍：对“有风险”或“停滞”的项目各派一个只做分析的任务（L2，pm 类，走经济档的便宜执行器）去查卡点和最小下一步；每天最多 3 个、同一项目同时只有一个、上一个处理完后一周内不再派（被你忽略则三周）。“要你处理”的项目不派任务，它们本来就在收件箱里。**归档**：任何项目都可以归档（`POST /api/projects/{key}/archive`，可同时忽略它名下未处理的事项，归属口径与看板一致；`/restore` 恢复）。归档 = 项目事实的 `status='archived'`：离开看板主列表和看管检查，不再出现在 Agent 的上下文里（只在“已归档项目，不要为它们创建任务、提醒或简报”一行点名），Agent 无法修改或复活它（`repo.upsert_fact` 对非用户拒绝），只有用户能恢复；上下文页勾选“显示已删除 / 过期”能看到。
+
+**收件箱的读法**（`js/domain/readable.js`）：每行一句白话结论或要求（“要你决定：…”“要你批准：…”“待你验收：…”“需要你接手：…”）加“AI 建议：…”，右侧只留一个相对时间和至多一个紧迫标记；项目标题写“N 项要你处理”和一句当前状态；风险 / 等级 / 优先级徽章、关键词标签、编号和成本折叠进阅读页的“详细信息”。阅读页先给“你需要做什么”（高亮 AI 推荐），再是前情提要，背景、来源、选项含义、时间线都折叠。
+
+**外观（`dashboard/css/glass.css`，最后加载）**：对齐 macOS 的玻璃质感——页面背后是柔和壁纸，侧栏悬浮、工具栏毛玻璃（内容从它下面滑过）、卡片/抽屉/弹窗半透明加模糊，系统蓝作唯一强调色。动效是“流水”式：切换页面时可见的卡片按 `--i` 依次升起（只在导航时播放，SSE 实时刷新不重播），KPI 数字滚动，进度条生长，按压有轻微弹簧回弹，侧栏高亮块在条目之间滑动。`prefers-reduced-motion` 关闭动画，`prefers-reduced-transparency` 或不支持 `backdrop-filter` 时退回实色。总览页的“白板”卡片（`/api/whiteboard`）显示所有 Agent 共同遵守的规则，可在卡片上直接添加，管理在上下文页。
 操作：重试 / 取消 / 修改等级与优先级 / 驳回 / 推迟 / 新建任务 / 审批 / 立即运行传感器 / 编辑上下文。
 实时：SSE `/api/stream` 推送事件总线消息。
 

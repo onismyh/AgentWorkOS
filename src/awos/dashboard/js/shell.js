@@ -68,6 +68,53 @@ function topbarHTML() {
 function setNavCollapsed(c) {
   $('#app').dataset.collapsed = c ? '1' : '0';
   pref.set('nav.collapsed', c);
+  setTimeout(() => moveNavInd(), 480);   // the sidebar glides to its new width first
+}
+
+/* ------------------------------------------------------------------ motion: the sliding sidebar highlight, the entrance cascade */
+const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+function moveNavInd() {
+  const nav = $('#nav'); if (!nav) return;
+  let ind = $('.nav-ind', nav);
+  const on = $('.nav-i.active', nav);
+  if (!ind) {
+    ind = document.createElement('i'); ind.className = 'nav-ind no-anim'; ind.setAttribute('aria-hidden', 'true'); nav.prepend(ind);
+    requestAnimationFrame(() => requestAnimationFrame(() => ind.classList.remove('no-anim')));   // the first placement must not fly in from the corner
+  }
+  if (!on || !on.offsetHeight) { ind.style.opacity = '0'; nav.classList.remove('has-ind'); return; }
+  nav.classList.add('has-ind');
+  ind.style.opacity = '1'; ind.style.width = `${on.offsetWidth}px`; ind.style.height = `${on.offsetHeight}px`;
+  ind.style.transform = `translate(${on.offsetLeft}px, ${on.offsetTop}px)`;
+}
+const FLOW_SEL = '.page-head, .kpi, .wb, .grid12 > *, .ctx-add, .ctx-main > .card, .bhead, .cell, .bcard, .tgroup, .art-card, .sensor, .filter-bar, .toolbar, .table-wrap, .sp-list, .sp-pane, .view-tabs, .view > .card, .tl-bar, .tl-group > header, .tl-row';
+let flowTimer = 0;
+/** Entrance cascade: what is on screen rises in one after another (stagger = --i). Runs on navigation only, never on a live refresh. */
+function playFlow(el) {
+  if (reducedMotion()) return;
+  const limit = innerHeight + 40; let i = 0;
+  $$('.fi', el).forEach((n) => n.classList.remove('fi'));
+  for (const n of $$(FLOW_SEL, el)) {
+    if (i > 30 || n.getBoundingClientRect().top > limit) continue;   // below the fold: no entrance to wait for
+    n.style.setProperty('--i', String(Math.min(i, 14))); n.classList.add('fi'); i += 1;
+  }
+  el.classList.add('flow');
+  countUp(el);
+  clearTimeout(flowTimer);
+  flowTimer = setTimeout(() => { el.classList.remove('flow'); $$('.fi', el).forEach((n) => n.classList.remove('fi')); }, 2200);
+}
+function countUp(root) {
+  for (const n of $$('.kpi-v', root)) {
+    const text = n.textContent.trim(); const m = /^(\$?)(\d+(?:\.\d+)?)$/.exec(text);
+    if (!m || !parseFloat(m[2])) continue;
+    const end = parseFloat(m[2]); const dec = (m[2].split('.')[1] || '').length; const t0 = performance.now();
+    const step = (t) => {
+      if (!n.isConnected) return;
+      const k = Math.min(1, (t - t0) / 950);
+      n.textContent = k < 1 ? `${m[1]}${(end * (1 - (1 - k) ** 4)).toFixed(dec)}` : text;
+      if (k < 1) requestAnimationFrame(step);
+    };
+    n.textContent = `${m[1]}${(0).toFixed(dec)}`; requestAnimationFrame(step);
+  }
 }
 ACTS['toggle-nav'] = () => setNavCollapsed($('#app').dataset.collapsed !== '1');
 ACTS['open-nav'] = () => document.body.classList.add('nav-open');
@@ -134,6 +181,7 @@ async function renderView(initial = false) {
   $('#view-sub').textContent = v.sub || '';
   $$('[data-view]').forEach((a) => { if (a.matches('a')) { const on = a.dataset.view === S.view; a.classList.toggle('active', on); if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); } });
   el.dataset.view = S.view;
+  moveNavInd();
   if (initial) setHTML(el, v.skeleton ? v.skeleton() : skeletonList());
   else el.classList.add('refetching');
   const seq = ++seqView;
@@ -144,6 +192,7 @@ async function renderView(initial = false) {
     setHTML(el, v.render(data, S.params));
     if (snap) restoreUI(el, snap); else el.scrollTop = 0;
     v.mount?.(el, data, S.params);
+    if (initial) playFlow(el);
     updateBadges();
   } catch (e) {
     if (seq === seqView) setHTML(el, errorState(e.message));
@@ -258,6 +307,7 @@ export async function boot() {
   applyTheme(curTheme());
   setNavCollapsed(!!pref.get('nav.collapsed', false));
   bindDelegation(); bindTooltips(); bindCharts(); bindKeys();
+  window.addEventListener('resize', () => requestAnimationFrame(moveNavInd));
   $('#scrim')?.addEventListener('click', () => document.body.classList.remove('nav-open'));
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;

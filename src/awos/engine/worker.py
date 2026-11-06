@@ -13,39 +13,16 @@ from ..brain.schemas import EXECUTE_SCHEMA, VERIFY_SCHEMA
 from ..config import load_config
 from ..executors.base import RunResult
 from ..models import LEVELS, TaskStatus
+from .router import filter_candidates, route_task  # noqa: F401  (filter_candidates re-exported)
 
 log = logging.getLogger("awos.worker")
 
 HANDOFF_CLASSES = {"budget", "capacity", "transient"}
-DEFAULT_CHEAP_READONLY = ("dev", "research", "learning", "data", "pm", "doc", "writing", "system", "other")
-DEFAULT_CHEAP_WRITE = ("dev", "research", "learning", "data", "pm", "system", "other")
 REASON_ZH = {"budget": "预算不足", "capacity": "预算额度被占用", "transient": "临时故障"}
 
 
-def choose_route(task: dict, sandbox: str, n_mail: int, preferred: str | None) -> str:
-    """Routing key for a task: analysis (read-only) and, for non-personal categories, write-level work too goes to the
-    cheap executors first (config routing.readonly / routing.write); everything else follows its category."""
-    cfg = load_config()
-    if preferred is None and not n_mail:
-        cheap = cfg.get("routing.cheap_readonly_categories" if sandbox == "read-only" else "routing.cheap_write_categories",
-                        DEFAULT_CHEAP_READONLY if sandbox == "read-only" else DEFAULT_CHEAP_WRITE)
-        if task["category"] in cheap:
-            return "readonly" if sandbox == "read-only" else "write"
-    return task["category"]
 
 
-def filter_candidates(candidates: list[str], *, sandbox: str, n_mail: int) -> list[str]:
-    """Who may be handed this task: mail content stays with the executors the user trusts with mail (codex/claude), and
-    Pi (no sandbox of its own) only gets read-only work unless executors.pi.allow_write is on."""
-    cfg = load_config()
-    out = []
-    for name in candidates:
-        if n_mail and name in ("pi", "dsh"):
-            continue
-        if name == "pi" and sandbox != "read-only" and not cfg.get("executors.pi.allow_write", False):
-            continue
-        out.append(name)
-    return out
 SETTLED = {"done", "review", "waiting_user", "failed", "cancelled", "dismissed"}
 
 
@@ -195,11 +172,11 @@ def _register_deliverables(task: dict, run_id: str, workspace: Path, out: dict) 
     return ids
 
 
-def _verify(task: dict, workspace: Path, out: dict, executed_by: str) -> dict | None:
+def _verify(task: dict, workspace: Path, out: dict, executed_by: str, trusted_only: bool = False) -> dict | None:
     from ..llm import pick_executor, run_agent
 
     ex = None
-    sensitive = (workspace / "inputs" / "mail").exists()  # mail-derived deliverables never go to the DeepSeek verifiers
+    sensitive = trusted_only or (workspace / "inputs" / "mail").exists()  # mail/private deliverables never go to the DeepSeek verifiers
     for cand in ("dsh", "pi", "codex", "claude"):  # cheapest independent opinion first, never the executor itself
         if cand == executed_by or (sensitive and cand in ("dsh", "pi")):
             continue
@@ -234,7 +211,7 @@ def process_task(task_id: str, owner: str) -> None:
 
 def _process(task: dict, owner: str) -> None:
     from ..hitl import outbox
-    from ..llm import executor_candidates, run_agent, shutting_down
+    from ..llm import run_agent, shutting_down
 
     meta = task.get("meta") or {}
     dec = policy.decide(task)
@@ -276,11 +253,10 @@ def _process(task: dict, owner: str) -> None:
         level_deliverable=LEVELS[dec.level]["deliverable"], acceptance=task.get("acceptance") or "（未给出，请自行定义合理标准并写进 summary）",
         description=task.get("description") or task["title"], extra=extra, workspace=str(workspace), readable=readable,
         level_instructions=prompts.LEVEL_INSTRUCTIONS[dec.level], security=prompts.SECURITY_RULES)
-    preferred = task.get("executor") if task.get("executor") in ("codex", "claude", "pi", "dsh") else None
-    if n_mail and preferred in ("pi", "dsh"):
-        preferred = None  # mail bodies only go to the executors the user already trusts with mail (codex/claude)
-    route = choose_route(task, dec.sandbox, n_mail, preferred)
-    candidates = filter_candidates(executor_candidates(route, preferred), sandbox=dec.sandbox, n_mail=n_mail)
+    decision = route_task(task, sandbox=dec.sandbox, n_mail=n_mail)
+    candidates = decision.order
+    repo.merge_task_meta(task["id"], routing={**decision.meta(), "attempt": task["attempts"]})
+    route = f"{decision.tier}/{'readonly' if dec.sandbox == 'read-only' else 'write'}"
     if not candidates:
         return fail_or_retry(task, owner, f"no eligible executor for route {route!r}", "transient")
     remaining = (float(load_config().get("budget.per_task_usd", 3.0)) + float(meta.get("budget_bonus", 0))
@@ -342,8 +318,9 @@ def _process(task: dict, owner: str) -> None:
 
     # 5) Independent verification for high-autonomy work.
     is_sub = bool(task.get("parent_id"))
-    if dec.level in policy.verify_levels() and not is_sub:
-        v = _verify(repo.get_task(task["id"]), workspace, out, executor)
+    important = (decision.importance == "high" and dec.level >= 3)   # a second opinion is cheap (DeepSeek) next to a wrong deliverable
+    if (dec.level in policy.verify_levels() or important) and not is_sub:
+        v = _verify(repo.get_task(task["id"]), workspace, out, executor, trusted_only=decision.trusted_only)
         if v is not None:
             repo.merge_task_meta(task["id"], verification=v)
             if not v.get("passed") or int(v.get("score", 0)) < policy.min_verify_score():

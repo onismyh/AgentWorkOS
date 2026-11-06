@@ -3,10 +3,10 @@
 import { h, enc } from '../core/html.js';
 import { icon } from './icons.js';
 import { btn, empty, statusBadge } from './components.js';
-import { countChips } from './topic-reader.js';
 import { relatedRow } from './project-card.js';
 import { when } from '../core/format.js';
 import { ageWord, oldTone, topicSel } from '../domain/topics.js';
+import { needsText, oneLineState } from '../domain/readable.js';
 import { pickRelated, projectSlot } from '../domain/projects.js';
 
 /**
@@ -20,21 +20,20 @@ export function projectReader(d, pg, ctx = {}) {
   const related = pickRelated(d?.related, 99);
   const tasks = d?.recent_tasks || [];
   const topicRow = (t) => h`<a class="pj-trow" href="#/${view}?sel=${enc(topicSel(t.key))}" data-act="split-select" data-key="${topicSel(t.key)}">
-    <span class="pj-trow-h"><span class="pj-trow-t">${t.title}</span>${t.oldest_ts ? h`<span class="tg-age tone-${oldTone(t.oldest_ts)}">${icon('clock', { size: 11 })}最早 ${ageWord(t.oldest_ts)}前</span>` : ''}</span>
-    <span class="pj-trow-c">${countChips(t.counts)}</span>
-    ${t.state_now ? h`<span class="pj-trow-s">${t.state_now}</span>` : ''}</a>`;
+    <span class="pj-trow-h"><span class="pj-trow-t">${t.title}</span><span class="tg-need">${t.counts.total} 项</span>${oldTone(t.oldest_ts) !== 'muted' ? h`<span class="tg-age tone-${oldTone(t.oldest_ts)}">已等 ${ageWord(t.oldest_ts)}</span>` : ''}</span>
+    ${t.state_now ? h`<span class="pj-trow-s">${oneLineState(t.state_now, 90)}</span>` : ''}</a>`;
   return h`<article class="reader topic-reader project-reader pj-c${projectSlot(pg.key)}" data-reader="project" data-key="${pg.key}">
     <header class="rd-head tp-head">
       <div class="tp-top"><span class="tp-kicker pj-kick">${icon('folder', { size: 13 })}项目</span><span class="grow"></span>
         ${btn('只看这个项目', { act: 'open-project-inbox', data: { key: pg.key }, size: 'sm', variant: 'ghost', icon: 'filter' })}
         ${btn('在上下文中查看', { act: 'open-context', data: { key: pg.key }, size: 'sm', variant: 'secondary', icon: 'book' })}</div>
       <h1 class="rd-title">${name}</h1>
-      <div class="rd-meta">${countChips(pg.counts, { cls: 'big' })}<span class="meta-i muted">${icon('layers', { size: 13 })}<span>${pg.topics.length} 个话题</span></span>
-        ${pg.oldest_ts ? h`<span class="meta-i tone-${oldTone(pg.oldest_ts)}" data-tip="这个项目里等得最久的一项"><span class="age-ink">${icon('clock', { size: 13 })}最早 ${ageWord(pg.oldest_ts)}前</span></span>` : ''}</div>
+      <div class="rd-meta slim"><span class="meta-i need-count">${needsText(pg.counts)}</span><span class="meta-i">${icon('layers', { size: 13 })}<span>${pg.topics.length} 个话题</span></span>
+        ${pg.oldest_ts && oldTone(pg.oldest_ts) !== 'muted' ? h`<span class="meta-i tone-${oldTone(pg.oldest_ts)}" data-tip="这个项目里等得最久的一项"><span class="age-ink">已等 ${ageWord(pg.oldest_ts)}</span></span>` : ''}</div>
     </header>
     <div class="rd-body">
-      <section class="tp-now pj-now" aria-labelledby="pj-now-h"><h2 id="pj-now-h">${icon('folder', { size: 14 })}项目简介</h2>
-        ${summary ? h`<p>${summary}</p>` : h`<p class="muted">这个项目还没有简介。可以在「上下文」里补充。</p>`}</section>
+      <section class="tp-now pj-now" aria-labelledby="pj-now-h"><h2 id="pj-now-h">${icon('folder', { size: 14 })}${pg.state_now ? '现在的状况' : '项目简介'}</h2>
+        ${pg.state_now ? h`<p>${pg.state_now}</p>${summary ? h`<p class="pj-about muted">项目简介：${summary}</p>` : ''}` : summary ? h`<p>${summary}</p>` : h`<p class="muted">这个项目还没有简介。可以在「上下文」里补充。</p>`}</section>
       <section class="tp-card" aria-labelledby="pj-topics-h">
         <header class="tp-card-h"><h2 id="pj-topics-h">${icon('layers', { size: 15 })}话题<span class="rd-sec-n">${pg.topics.length}</span></h2><span class="tp-hint">点开一个话题，先看前情提要</span></header>
         <div class="tp-card-b pj-topics">${pg.topics.map(topicRow)}</div></section>

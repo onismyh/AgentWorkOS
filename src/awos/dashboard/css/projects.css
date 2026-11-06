@@ -17,10 +17,6 @@ button.pj-chip:hover { border-color: var(--pjc, var(--brand)); background: color
 .pj-chip.pj-none .ic { fill: none; color: var(--faint); }
 button.pj-chip.pj-none:hover { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-ink); }
 .srow .pj-chip.in-row { max-width: 124px; }
-.srow .sr-tp { max-width: 112px; }
-.srow .sr-l3 { flex-wrap: wrap; gap: 4px 6px; }
-.srow .sr-l3 .chips { flex-wrap: nowrap; min-width: 0; overflow: hidden; }
-.srow .sr-l3 .grow { flex: 1 1 0; }
 .tg-l2 .pj-chip { max-width: 190px; }
 
 /* =================================================================== inbox list: 按项目 */
@@ -43,12 +39,11 @@ button.pj-chip.pj-none:hover { border-color: var(--brand); background: var(--bra
 .tgroup.sub + .tgroup.sub { border-top: 1px solid var(--border); }
 .tgroup.sub .tg-row { border-bottom: 1px solid var(--border); }
 .tgroup.sub.closed .tg-row { border-bottom: 0; }
-.tgroup.sub .tg-title { font-size: 13px; font-weight: 600; }
+.tgroup.sub .tg-title { font-size: 12.5px; font-weight: 600; color: var(--fg-2); }
+.tgroup.sub .tg-need { font-weight: 500; color: var(--muted-fg); }
+.tgroup.sub .tg-row { background: transparent; }
 .tgroup.sub .tg-tog { width: 30px; padding-left: 0; }
 .pgroup:last-child > .pg-topics > .tgroup.sub:last-child > .srow:last-child, .pgroup > .pg-topics > .tgroup.sub:last-child > .srow:last-child { border-bottom: 0; }
-.tg-tp { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--fg-2); font-size: 12px; }
-.tg-tp .ic { flex: none; color: var(--muted-fg); }
-.tg-tp span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tgroup.by-project .tg-title { font-size: 14px; }
 .chip-f.chip-pj .chip-pj-n { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
 .chip-f.chip-pj { max-width: 100%; }
@@ -203,3 +198,5 @@ details.ctx-prog > summary { padding: 6px 0; }
   .pj-card.flash, .pjc.focus { animation: none; }
   .pjc-ch { transition: none; }
 }
+.ctx-rules { border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); box-shadow: inset 3px 0 0 var(--primary); }
+.pj-about { margin-top: 6px; font-size: 12.5px; }

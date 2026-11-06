@@ -4,16 +4,17 @@ import { h, raw, setHTML, $, $$, enc } from '../core/html.js';
 import { api, post } from '../core/api.js';
 import { ACTS } from '../core/acts.js';
 import { S, CACHE, cacheApproval, cacheTask } from '../core/state.js';
-import { absTime, cut, when } from '../core/format.js';
+import { absTime, when } from '../core/format.js';
 import { plain } from '../core/markdown.js';
 import { icon } from './icons.js';
-import { btn, badge, empty, levelBadge, riskBadge } from './components.js';
+import { btn, empty } from './components.js';
 import { dialog, toast } from './overlay.js';
 import { optionButtons, taskActionList } from './reader.js';
 import { recapTimeline, briefNote, genBtnHTML } from './recap.js';
 import { projectCard, mountProjectCards } from './project-card.js';
 import { digestOf, recommendedKey } from '../domain/vocab.js';
 import { SECTIONS, SECTION_VIEW, ageWord, countSections, dropTopicCache, normalizeEntries, oldTone } from '../domain/topics.js';
+import { ASK, needsText, urgencyOf } from '../domain/readable.js';
 
 /** The little "决定 2 · 批准 1" pills (also used by the list header). */
 export function countChips(counts, { cls = '' } = {}) {
@@ -29,7 +30,7 @@ function needCard(it, ask, ctx) {
   const approval = it.kind === 'approval' ? CACHE.approvals.get(it.id) : null;
   if (it.kind === 'task') cacheTask({ id: it.id, status: it.status, title: it.title, headline: dg.headline });
   const question = ask?.question || dg.headline;
-  const about = ask?.question && dg.headline !== question ? dg.headline : '';
+  const urg = urgencyOf(it);
   let actions;
   if (it.kind === 'approval') {
     actions = approval?.options
@@ -42,9 +43,9 @@ function needCard(it, ask, ctx) {
   }
   const href = `#/${ctx.hasItem(key) ? ctx.view : 'inbox'}?sel=${enc(key)}`;
   return h`<article class="need tone-${sec.tone}" data-need="${key}">
-    <header class="need-h">${badge(sec.title, { tone: sec.tone, variant: 'soft', icon: sec.icon })}${it.kind === 'approval' ? riskBadge(it.risk) : it.level ? levelBadge(it) : ''}<span class="grow"></span><span class="need-w">${when(it.ts, { short: true })}</span></header>
+    <header class="need-h"><span class="need-verb tone-${sec.tone}">${icon((ASK[it.section] || sec).icon || 'circle', { size: 14 })}<b>${(ASK[it.section] || {}).verb || sec.title}</b></span>${urg ? h`<span class="rd-flag tone-${urg.tone}">${urg.text}</span>` : ''}<span class="grow"></span><span class="need-w">${when(it.ts, { short: true })}</span></header>
     <h4 class="need-q">${question}</h4>
-    ${about ? h`<p class="need-about">关于：${about}${dg.gist ? ` — ${cut(dg.gist, 80)}` : ''}</p>` : (!ask && dg.gist ? h`<p class="need-about">${dg.gist}</p>` : '')}
+    ${!ask && dg.gist ? h`<p class="need-about">${dg.gist}</p>` : ''}
     ${ask?.why_now ? h`<p class="need-why">${icon('hourglass', { size: 13 })}<span>${ask.why_now}</span></p>` : ''}
     ${ask?.stakes ? h`<p class="need-stakes"><b>利害</b>${ask.stakes}</p>` : ''}
     ${approval?.recommendation ? h`<p class="need-rec">${icon('sparkles', { size: 13 })}<span>AI 的理由：${plain(approval.recommendation, 120)}</span></p>` : ''}
@@ -71,12 +72,14 @@ export function topicReader(d, ctx = {}) {
       <div class="tp-top"><span class="tp-kicker">${icon('layers', { size: 13 })}话题</span><span class="grow"></span>
         ${items.length ? btn('这个话题都不用管了…', { act: 'topic-dismiss', data: { key: d.key }, size: 'sm', variant: 'ghost-destructive', icon: 'ban' }) : ''}</div>
       <h1 class="rd-title">${d.title}</h1>
-      <div class="rd-meta">${countChips(counts, { cls: 'big' })}${oldest ? h`<span class="meta-i tone-${oldTone(oldest)}" data-tip="最早的一项出现于 ${absTime(oldest, true)}"><span class="age-ink">${icon('clock', { size: 13 })}最早 ${ageWord(oldest)}前</span></span>` : ''}
-        ${hist.length ? h`<span class="meta-i muted">${icon('history', { size: 13 })}<span>${hist.length} 条记录</span></span>` : ''}</div>
+      <div class="rd-meta slim"><span class="meta-i need-count">${items.length ? needsText(counts) : '没有待处理事项'}</span>${oldest && oldTone(oldest) !== 'muted' ? h`<span class="meta-i tone-${oldTone(oldest)}" data-tip="最早的一项出现于 ${absTime(oldest, true)}"><span class="age-ink">已等 ${ageWord(oldest)}</span></span>` : ''}</div>
     </header>
     <div class="rd-body">
-      ${d.project === undefined ? '' : projectCard(d.project, { key: d.key, title: d.title })}
-      <section class="tp-now" aria-labelledby="tp-now-h"><h2 id="tp-now-h">${icon('sparkles', { size: 14 })}现状</h2>
+      <section class="tp-card tp-needs" aria-labelledby="tp-need-h">
+        <header class="tp-card-h"><h2 id="tp-need-h">${icon('hand', { size: 15 })}现在需要你${items.length ? h`<span class="rd-sec-n">${items.length}</span>` : ''}</h2>${items.length > 1 ? h`<span class="tp-hint">在这里就能一次处理完</span>` : ''}</header>
+        <div class="tp-card-b">${items.length ? h`<div class="need-list">${items.map((it) => needCard(it, asks.find((a) => a.id === it.id), c))}</div>`
+          : empty({ icon: 'check-check', title: '这个话题没有待处理的事项', desc: '有新的问题时会出现在这里。' })}</div></section>
+      <section class="tp-now" aria-labelledby="tp-now-h"><h2 id="tp-now-h">${icon('sparkles', { size: 14 })}现在的状况</h2>
         ${brief?.state_now ? h`<p>${brief.state_now}</p>`
           : last ? h`<p>${last.text}<span class="muted"> · ${when(last.ts)}</span></p>` : h`<p class="muted">这个话题还没有任何记录。</p>`}</section>
       <section class="tp-card" aria-labelledby="tp-rc-h">
@@ -84,10 +87,7 @@ export function topicReader(d, ctx = {}) {
         <div class="tp-card-b">${briefNote(d.key, brief, { button: false })}
           ${recapTimeline(entries)}
           ${brief && hist.length ? h`<details class="rc-full" id="tpfull-${d.key}"><summary>${icon('chevron-right', { size: 13, cls: 'rc-fch' })}<span>查看完整经过</span><small>${hist.length} 条系统记录</small></summary><div class="rc-full-b">${recapTimeline(hist, { cls: 'compact' })}</div></details>` : ''}</div></section>
-      <section class="tp-card tp-needs" aria-labelledby="tp-need-h">
-        <header class="tp-card-h"><h2 id="tp-need-h">${icon('hand', { size: 15 })}现在需要你${items.length ? h`<span class="rd-sec-n">${items.length}</span>` : ''}</h2>${items.length > 1 ? h`<span class="tp-hint">在这里就能一次处理完</span>` : ''}</header>
-        <div class="tp-card-b">${items.length ? h`<div class="need-list">${items.map((it) => needCard(it, asks.find((a) => a.id === it.id), c))}</div>`
-          : empty({ icon: 'check-check', title: '这个话题没有待处理的事项', desc: '有新的问题时会出现在这里。' })}</div></section>
+      ${d.project === undefined ? '' : projectCard(d.project, { key: d.key, title: d.title })}
     </div></article>`;
 }
 

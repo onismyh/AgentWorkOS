@@ -1,0 +1,11 @@
+/* 分配依据 (task page): which executors the work was routed to and why. */
+.rt-sum { margin-left: 8px; color: var(--muted-fg); font-size: 12px; font-weight: 400; }
+.rt-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.rt-order { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 4px; margin-bottom: 8px; }
+.rt-order .muted { margin-right: 6px; }
+.rt-ex { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px 0 5px; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--surface-hi); font-size: 12.5px; color: var(--fg-2); }
+.rt-ex.ran { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-ink); font-weight: 600; }
+.rt-arrow { display: inline-grid; color: var(--faint); }
+.rt-ran { margin: 0 0 8px; color: var(--fg-2); font-size: 12.5px; line-height: 1.6; }
+.rt-why { margin: 0; padding-left: 18px; list-style: disc; color: var(--fg-2); font-size: 12.5px; line-height: 1.7; }
+.rt-why li::marker { color: var(--faint); }

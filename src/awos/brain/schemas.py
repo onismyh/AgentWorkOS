@@ -32,6 +32,8 @@ TRIAGE_SCHEMA: dict = {
                     "due_at": {"type": ["string", "null"], "description": "YYYY-MM-DD or null"},
                     "acceptance": {"type": "string"},
                     "executor_hint": {"type": ["string", "null"], "enum": _EXECS + [None]},
+                    "difficulty": {"type": ["string", "null"], "enum": ["easy", "medium", "hard", None],
+                                   "description": "how hard the work itself is (used to pick the executor tier)"},
                     "reason": {"type": "string", "description": "why create/ignore; for ignore keep it short"},
                     "headline": {"type": "string", "description": "<=26 chars, verb-first card title"},
                     "gist": {"type": "string", "description": "<=50 chars one-line status/why-you"},
@@ -61,6 +63,7 @@ PLAN_SCHEMA: dict = {
                     "category": {"type": "string", "enum": _CATS},
                     "level": {"type": "integer", "minimum": 1, "maximum": 5},
                     "executor_hint": {"type": ["string", "null"], "enum": _EXECS + [None]},
+                    "difficulty": {"type": ["string", "null"], "enum": ["easy", "medium", "hard", None]},
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                     "acceptance": {"type": "string"},
                 },
@@ -105,7 +108,7 @@ EXECUTE_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "enum": ["send_email", "post_message", "publish", "git_push", "git_commit", "apply_to_project",
+                    "type": {"type": "string", "enum": ["send_email", "post_message", "publish", "git_push", "git_commit", "open_mr", "apply_to_project",
                                                         "calendar_write", "notion_write", "delete", "spend", "submit_form", "other"]},
                     "title": {"type": "string"},
                     "description": {"type": "string"},

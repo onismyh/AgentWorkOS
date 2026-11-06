@@ -51,8 +51,9 @@ def create_subtasks(parent: dict, subtasks: list[dict], run_id: str | None = Non
         key_to_id[s["key"]] = repo.create_task(
             s["title"], description=s.get("description"), kind="todo", category=s.get("category") or parent["category"],
             priority=parent["priority"], level=min(int(s.get("level", parent["level"])), int(parent["level"])),
-            status=TaskStatus.READY, parent_id=parent["id"], executor=s.get("executor_hint"), project=parent.get("project"),
-            source="subtask", acceptance=s.get("acceptance"), meta={"plan_key": s["key"], "plan_run": run_id},
+            status=TaskStatus.READY, parent_id=parent["id"], project=parent.get("project"),
+            source="subtask", acceptance=s.get("acceptance"), meta={"plan_key": s["key"], "plan_run": run_id,
+                  **{k: v for k, v in (("executor_hint", s.get("executor_hint")), ("difficulty", s.get("difficulty"))) if v}},
             dedupe_key=repo.fingerprint("subtask", parent["id"], s["key"], (parent.get("meta") or {}).get("plan_round", 0)))
     for s in subtasks:
         for dep in s.get("depends_on", []):

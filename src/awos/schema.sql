@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     task_id         TEXT,
     run_id          TEXT,
     kind            TEXT NOT NULL,            -- action | decision | review | permission | budget
-    action_type     TEXT,                     -- send_email | post_message | publish | git_push | apply_to_project | calendar_write | notion_write | delete | spend | other
+    action_type     TEXT,                     -- send_email | post_message | publish | git_push | git_commit | open_mr | apply_to_project | calendar_write | notion_write | delete | spend | other
     title           TEXT NOT NULL,
     context_md      TEXT,                     -- background the human needs
     recommendation  TEXT,                     -- AI recommendation (option key + why)
@@ -266,3 +266,20 @@ CREATE TABLE IF NOT EXISTS topic_projects (
     source      TEXT NOT NULL DEFAULT 'llm',   -- llm | rule | user
     updated_at  TEXT NOT NULL
 );
+
+-- Project milestones the user (or an agent, later) sets by hand. The project timeline adds auto-derived markers
+-- (deadline facts, delivered L4/L5 outcomes) on top of these at read time; they are never stored here.
+CREATE TABLE IF NOT EXISTS milestones (
+    id          TEXT PRIMARY KEY,
+    project_key TEXT NOT NULL,                 -- a canonical project (context fact kind 'project') or '__none__'
+    title       TEXT NOT NULL,
+    summary     TEXT,
+    target_date TEXT,                          -- YYYY-MM-DD (local date) or NULL
+    status      TEXT NOT NULL DEFAULT 'planned', -- planned | active | done | missed
+    source      TEXT NOT NULL DEFAULT 'user',  -- user | agent
+    evidence    TEXT,                          -- json {task_id, approval_id, note}
+    done_at     TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_milestones_project ON milestones(project_key);

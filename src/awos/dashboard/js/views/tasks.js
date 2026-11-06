@@ -13,6 +13,7 @@ import { popover, closePopover } from '../ui/overlay.js';
 import { META, PURPOSES, digestOf, catLabel, effLevel, execLabel, purposeLabel, SENSITIVE_RE, TERMINAL } from '../domain/vocab.js';
 import { evBody } from '../ui/rundetail.js';
 import { LEVEL_OPTS } from '../domain/actions.js';
+import { executorOf } from '../ui/routing.js';
 
 /* ------------------------------------------------------------------ tasks */
 const COLS = [
@@ -42,7 +43,7 @@ function taskRow(t, cols) {
     priority: () => h`<td>${prioIcon(t.priority)}</td>`,
     title: () => h`<td class="title-cell"><div class="tc-t">${dg.headline}</div><div class="tc-s">${dg.headline !== t.title ? h`<span class="tc-full">${cut(t.title, 70)}</span>` : ''}<span class="mono">${shortId(t.id)}</span>${t.parent_title ? h`<span>子任务 · ${cut(t.parent_title, 30)}</span>` : ''}${t.pending_approvals ? badge(`${t.pending_approvals} 待审批`, { tone: 'warn', variant: 'soft', icon: 'shield-alert' }) : ''}</div></td>`,
     level: () => h`<td>${levelBadge(t)}</td>`, status: () => h`<td>${statusBadge(t.status)}</td>`, category: () => h`<td class="nowrap">${catLabel(t.category)}</td>`,
-    executor: () => h`<td class="nowrap"><span class="exchip">${execAvatar(t.executor, { size: 18, tip: false })}<span>${execLabel(t.executor)}</span></span></td>`,
+    executor: () => h`<td class="nowrap"><span class="exchip">${execAvatar(executorOf(t), { size: 18, tip: false })}<span>${execLabel(executorOf(t))}</span></span></td>`,
     project: () => h`<td class="nowrap">${t.project || h`<span class="muted">—</span>`}</td>`,
     due: () => h`<td class="nowrap${overdue ? ' tone-crit-ink' : ''}">${due ? absTime(t.due_at) : h`<span class="muted">—</span>`}</td>`,
     keywords: () => h`<td>${kwChips(dg.keywords, { max: 3 })}</td>`,

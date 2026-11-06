@@ -131,7 +131,8 @@ function contextRender(d, p) {
   const kindCard = (k) => (k === 'project'
     ? card({ title: kinds[k] || k, desc: d.projects ? `${groups0[k].length} 个项目 · 共 ${nLinked} 项待处理` : k, actions: h`<span class="tab-n">${groups0[k].length}</span>`, flush: true,
       body: h`<div class="pjc-list">${groups0[k].map((f) => projectCardHTML(f, meta, byProject.get(f.key) || []))}</div>` })
-    : card({ title: kinds[k] || k, desc: k, actions: h`<span class="tab-n">${groups0[k].length}</span>`, flush: true, body: h`<div class="facts">${groups0[k].map(fact)}</div>` }));
+    : card({ title: kinds[k] || k, desc: k === 'rule' ? '所有 Agent 的提示词最前面都会带上这些规则；只有你能改，Agent 只能读' : k, cls: k === 'rule' ? 'ctx-rules' : '', icon: k === 'rule' ? 'pin' : undefined,
+      actions: h`<span class="tab-n">${groups0[k].length}</span>`, flush: true, body: h`<div class="facts">${groups0[k].map(fact)}</div>` }));
   const orphanCard = orphan.length ? card({ title: '工作笔记', desc: 'AI 自动记录的进展，不是项目', cls: 'ctx-progress', actions: h`<span class="tab-n">${orphan.length}</span>`, flush: true,
     body: h`<details class="ctx-prog" id="ctx-prog"><summary>${icon('chevron-right', { size: 13, cls: 'pjc-ch' })}<span>展开 ${orphan.length} 条</span><small>没有对应到某个项目</small></summary><div class="facts">${orphan.map((n) => progressFact(n))}</div></details>` }) : '';
   return h`<form class="card ctx-add" data-form="add-fact"><header class="card-h"><div class="card-t"><span class="card-ic">${icon('plus', { size: 15 })}</span><h3>添加上下文</h3><p class="card-d">你添加或编辑的条目会被锁定，Agent 的自动刷新不会覆盖</p></div></header>

@@ -4,6 +4,7 @@ import { api, ApiError } from '../core/api.js';
 import { enc } from '../core/html.js';
 import { parseTs } from '../core/format.js';
 import { catLabel } from './vocab.js';
+import { sortItems } from './readable.js';
 
 /** The open-item sections of the inbox feed, in urgency order, with their short labels (决定 2 · 批准 1 · 验收 1). */
 export const SECTIONS = [
@@ -95,7 +96,7 @@ export function groupByTopic(items, serverTopics = []) {
   const out = [...by.values()].map((g) => {
     const m = meta.get(g.key) || {};
     return {
-      key: g.key, title: m.title || g.title, items: g.items, counts: countSections(g.items), rank: m.rank ?? null,
+      key: g.key, title: m.title || g.title, items: sortItems(g.items), counts: countSections(g.items), rank: m.rank ?? null,
       oldest_ts: m.oldest_ts || minTs(g.items), newest_ts: m.newest_ts || maxTs(g.items),
       state_now: m.state_now || '', has_brief: !!m.has_brief, brief_stale: !!m.brief_stale, project: m.project || null,
     };

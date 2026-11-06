@@ -74,6 +74,13 @@ def should_autostart(task: dict, triage_autostart: bool) -> tuple[bool, str]:
     return True, "policy allows autostart"
 
 
+def git_policy() -> dict[str, Any]:
+    """Whiteboard git rule: commits/pushes of non-protected branches run without asking; the rest needs the human."""
+    g = load_policy().get("git", {}) or {}
+    return {"auto_branch_actions": bool(g.get("auto_branch_actions", True)),
+            "protected_branches": [str(b) for b in g.get("protected_branches", ["main", "master"])]}
+
+
 def needs_approval(action_type: str) -> bool:
     pol = load_policy()
     always = set(pol.get("actions", {}).get("always_approve", [])) | SENSITIVE_ACTIONS

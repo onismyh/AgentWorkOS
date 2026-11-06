@@ -502,8 +502,8 @@ def upsert_fact(kind: str, key: str, value: str, *, source: str | None = None, c
         row = c.execute("SELECT * FROM context_facts WHERE kind = ? AND key = ?", (kind, key)).fetchone()
         existing = dict(row) if row else None
         if existing:
-            if existing["pinned"] and actor != "user":
-                return None
+            if (existing["pinned"] or existing["status"] == "archived") and actor != "user":
+                return None   # confirmed by the user / archived by the user: agents may not change or revive it
             if existing["value"] == value and existing["status"] == status and pinned is None:
                 return existing["id"]
             fields: dict[str, Any] = {"value": value, "source": source, "confidence": confidence, "status": status,
@@ -531,6 +531,10 @@ def list_facts(kind: str | None = None, status: str | None = "active") -> list[d
         sql += " AND status = ?"; params.append(status)
     sql += " ORDER BY kind, pinned DESC, confidence DESC, updated_at DESC"
     return q(sql, params)
+
+
+def set_fact_status(fact_id: str, status: str) -> None:
+    db.update("context_facts", "id", fact_id, {"status": status, "updated_at": utcnow()})
 
 
 def delete_fact(fact_id: str, actor: str = "user") -> None:
@@ -643,3 +647,59 @@ def link_topic_project(topic_key: str, project_key: str | None, source: str = "l
 
 def topic_project_links() -> dict[str, dict]:
     return {r["topic_key"]: r for r in q("SELECT * FROM topic_projects")}
+
+
+# --------------------------------------------------------------------------- milestones
+
+
+MILESTONE_STATUSES = ("planned", "active", "done", "missed")
+
+
+def list_milestones(project_key: str | None = None) -> list[dict]:
+    sql, params = "SELECT * FROM milestones WHERE 1=1", []
+    if project_key is not None:
+        sql += " AND project_key = ?"; params.append(project_key)
+    return [_decode(r, "evidence") for r in q(sql + " ORDER BY COALESCE(target_date, '9999-99-99'), created_at", params)]
+
+
+def get_milestone(milestone_id: str) -> dict | None:
+    r = q1("SELECT * FROM milestones WHERE id = ?", (milestone_id,))
+    return _decode(r, "evidence") if r else None
+
+
+def create_milestone(project_key: str, title: str, *, summary: str | None = None, target_date: str | None = None,
+                     status: str = "planned", source: str = "user", evidence: dict | None = None, actor: str = "user") -> str:
+    now = utcnow()
+    mid = new_id("ms")
+    with tx() as c:
+        db.insert("milestones", {"id": mid, "project_key": project_key, "title": title, "summary": summary, "target_date": target_date,
+                                 "status": status, "source": source, "evidence": dumps(evidence) if evidence else None,
+                                 "done_at": now if status == "done" else None, "created_at": now, "updated_at": now}, conn=c)
+        log_event("milestone", mid, "created", {"project": project_key, "title": title, "target_date": target_date, "status": status}, actor=actor, conn=c)
+    return mid
+
+
+def update_milestone(milestone_id: str, fields: dict, actor: str = "user") -> dict | None:
+    cur = get_milestone(milestone_id)
+    if cur is None:
+        return None
+    now = utcnow()
+    upd = {k: fields[k] for k in ("title", "summary", "target_date", "status") if k in fields and (fields[k] is not None or k in ("target_date", "summary"))}
+    if "status" in upd:
+        upd["done_at"] = (cur.get("done_at") or now) if upd["status"] == "done" else None
+    upd["updated_at"] = now
+    with tx() as c:
+        db.update("milestones", "id", milestone_id, upd, conn=c)
+        log_event("milestone", milestone_id, "updated", {"project": cur["project_key"], "title": upd.get("title", cur["title"]),
+                                                          "from": cur["status"], "to": upd.get("status", cur["status"])}, actor=actor, conn=c)
+    return get_milestone(milestone_id)
+
+
+def delete_milestone(milestone_id: str, actor: str = "user") -> bool:
+    cur = get_milestone(milestone_id)
+    if cur is None:
+        return False
+    with tx() as c:
+        c.execute("DELETE FROM milestones WHERE id = ?", (milestone_id,))
+        log_event("milestone", milestone_id, "deleted", {"project": cur["project_key"], "title": cur["title"]}, actor=actor, conn=c)
+    return True

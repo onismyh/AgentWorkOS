@@ -11,7 +11,7 @@ export const META = {
   apvKind: { action: '动作', decision: '决策', review: '评审', permission: '权限', budget: '预算' },
   categories: {}, kinds: { todo: '待办事项', issue: '潜在问题', opportunity: '项目机会', decision: '需要决策', info: '信息' },
   levels: {}, executors: ['codex', 'claude', 'pi', 'dsh', 'internal'],
-  factKinds: { role: '角色', project: '项目', goal: '目标', interest: '兴趣', habit: '习惯', preference: '偏好', person: '人物', deadline: '截止日期', note: '备注' },
+  factKinds: { rule: '白板规则', role: '角色', project: '项目', goal: '目标', interest: '兴趣', habit: '习惯', preference: '偏好', person: '人物', deadline: '截止日期', note: '备注' },
   transitions: {}, version: '',
 };
 

@@ -8,7 +8,8 @@ import { go } from '../core/router.js';
 import { enc } from '../core/html.js';
 import { empty, skeletonList } from '../ui/components.js';
 import { Split, setActiveSplit, splitKeys } from './split.js';
-import { digestOf } from '../domain/vocab.js';
+import { digestOf, recommendedKey } from '../domain/vocab.js';
+import { recLabel } from '../domain/readable.js';
 import { topicKeyOf, topicTitleOf } from '../domain/topics.js';
 
 export const INBOX_SECTIONS = [
@@ -49,7 +50,8 @@ export function inboxItems(d) {
       headline: dg.headline, gist: dg.gist, keywords: dg.keywords, auto: dg.auto, title: f.title || r.title || '', level: f.level, priority: f.priority ?? r.priority,
       risk: f.risk, action_type: f.action_type, status: f.status, ts: f.ts, stamp: String(f.ts || ''), expires_at: f.expires_at,
       source: r.source, category: r.category, project: r.project, tone: f.risk === 'high' ? 'crit' : (TONE[f.section] || 'muted'),
-      effective_level: f.level, level_cap: r.level_cap,
+      effective_level: f.level, level_cap: r.level_cap, due_at: r.due_at || f.due_at || null,
+      rec_label: f.kind === 'approval' ? recLabel(r, recommendedKey) : '',
     };
   });
 }

@@ -118,6 +118,11 @@ def executor_candidates(route: str, preferred: str | None = None) -> list[str]:
     return [name for name in order if executor_enabled(name) and _available(name)[0]]
 
 
+def usable(names: list[str]) -> list[str]:
+    """The enabled + available executors among `names`, order kept."""
+    return [name for name in names if executor_enabled(name) and _available(name)[0]]
+
+
 def pick_executor(route: str, preferred: str | None = None) -> str:
     """Choose an executor for a routing key (category or purpose), honouring an explicit preference."""
     cands = executor_candidates(route, preferred)
@@ -182,6 +187,16 @@ def budget_ok(executor: str) -> tuple[bool, str]:
     cap_usd = float(cfg.get("budget.daily_usd", 8.0))
     spent = float(repo.cost_today()["usd"])
     return (spent < cap_usd, f"spent today ${spent:.2f}/${cap_usd:.2f}")
+
+
+def budget_fraction(executor: str) -> float:
+    """Share of today's budget this executor has used: codex counts runs, the pay-per-use ones share the daily USD."""
+    cfg = load_config()
+    if executor == "codex":
+        cap = int(cfg.get("budget.codex_daily_runs", 60))
+        return repo.cost_today("codex")["runs"] / cap if cap else 0.0
+    cap_usd = float(cfg.get("budget.daily_usd", 8.0))
+    return float(repo.cost_today()["usd"]) / cap_usd if cap_usd else 0.0
 
 
 FALLBACK_CLASSES = {"budget", "capacity", "transient"}   # same reasons the task worker hands a task to the next executor

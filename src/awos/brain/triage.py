@@ -105,8 +105,10 @@ def triage_once(limit: int = 25) -> dict:
         fields = dict(title=item["title"][:200], kind=item.get("kind", "todo"), category=item.get("category", "other"),
                       priority=int(item.get("priority", 2)), level=int(item.get("level", 1)),
                       level_reason=item.get("level_reason"), project=item.get("project"), due_at=item.get("due_at"),
-                      acceptance=item.get("acceptance"), executor=item.get("executor_hint"))
+                      acceptance=item.get("acceptance"))
         complexity = item.get("complexity", "simple")
+        # a suggestion, not a choice: the router weighs it with importance, difficulty and trust (engine/router.py)
+        routing_hints = {"executor_hint": item.get("executor_hint"), "difficulty": item.get("difficulty")}
         autostart = bool(item.get("autostart"))
         if ref_tasks:  # classify the existing manual task in place
             tid = ref_tasks[0]
@@ -120,7 +122,7 @@ def triage_once(limit: int = 25) -> dict:
             if not t.get("description"):
                 upd["description"] = item.get("description")
             repo.update_task(tid, **upd)
-            repo.merge_task_meta(tid, complexity=complexity, triage_run=run_id, triage_reason=reason)
+            repo.merge_task_meta(tid, complexity=complexity, triage_run=run_id, triage_reason=reason, **routing_hints)
             autostart = True  # explicitly requested by the human
             stats["classified"] += 1
         else:
@@ -130,7 +132,7 @@ def triage_once(limit: int = 25) -> dict:
             tid = repo.create_task(fields.pop("title"), description=f"{desc}\n\n**来源**：\n{src_lines}", status=TaskStatus.INBOX,
                                    source=f"sensor:{sig_ids[ref_sigs[0]]['source']}", source_signal_id=ref_sigs[0],
                                    meta={"complexity": complexity, "triage_run": run_id, "triage_reason": reason,
-                                         "signals": ref_sigs}, **fields)
+                                         "signals": ref_sigs, **{k: v for k, v in routing_hints.items() if v}}, **fields)
             stats["created"] += 1
         for r in ref_sigs:
             repo.mark_signal(r, "triaged", task_id=tid, note=reason)

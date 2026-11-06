@@ -28,10 +28,11 @@ _SAFE_PREFIXES = ["cd", "pwd", "ls", "wc", "head", "tail", "du", "file", "Get-Ch
                   "git status", "git --no-optional-locks status", "git diff", "git log", "git show", "git ls-files",
                   "git rev-parse", "git rev-list", "git blame", "git shortlog", "git describe", "git cat-file",
                   "git branch --list", "git branch -vv", "git stash list", "git config --get"]
-# Guard rails for every run: git writes and destructive commands go through the Outbox (git_commit / git_push /
-# apply_to_project actions executed by the system after approval), never straight from an agent.
+# Guard rails for every run: git writes and destructive commands go through the Outbox (git_commit / git_push / open_mr /
+# apply_to_project actions executed by the system), never straight from an agent. Branch commits/pushes are executed
+# without sign-off by the whiteboard rule (hitl/gitops.py checks the branch); MRs/PRs and protected branches wait for the human.
 _DENY_PREFIXES = ["git push", "git commit", "git reset", "git clean", "git checkout", "git rebase", "git merge", "git stash drop",
-                  "git diff --output", "git log --output", "git show --output", "rm -rf", "rm -r", "del /s", "rmdir /s",
+                  "git diff --output", "git log --output", "git show --output", "gh pr", "gh api", "gh repo", "gh release", "rm -rf", "rm -r", "del /s", "rmdir /s",
                   "Remove-Item", "Clear-Content", "Format-Volume", "format"]
 
 
