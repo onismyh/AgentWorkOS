@@ -48,8 +48,13 @@ def repo_dir_of(payload: dict) -> Path:
     return repo_dir
 
 
+# `HEAD`, `refs/heads/main`, `heads/main`, ... all name an existing ref (often the default branch) rather than a new branch.
+_REF_SPELLINGS = re.compile(r"^(HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|@)$|^(refs|heads|remotes|tags)/", re.I)
+
+
 def valid_branch(name: str) -> bool:
-    return bool(_BRANCH_RE.match(name)) and ".." not in name and "//" not in name and not name.endswith(("/", ".", ".lock"))
+    return (bool(_BRANCH_RE.match(name)) and ".." not in name and "//" not in name and "@{" not in name
+            and not name.endswith(("/", ".", ".lock")) and not _REF_SPELLINGS.search(name))
 
 
 def current_branch(repo_dir: Path) -> str:
@@ -58,17 +63,23 @@ def current_branch(repo_dir: Path) -> str:
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
-def default_branch(repo_dir: Path) -> str | None:
-    p = git(repo_dir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+def default_branch(repo_dir: Path, remote: str = "origin") -> str | None:
+    p = git(repo_dir, "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD")
     return p.stdout.strip().split("/", 1)[-1] if p.returncode == 0 and p.stdout.strip() else None
 
 
-def protected_branches(repo_dir: Path) -> set[str]:
-    names = set(policy.git_policy()["protected_branches"])
-    default = default_branch(repo_dir)
-    if default:
-        names.add(default)
+def protected_branches(repo_dir: Path, remote: str = "origin") -> set[str]:
+    """Lower-cased: on macOS/Windows `MAIN` and `main` are the same loose ref file."""
+    names = {str(n).lower() for n in policy.git_policy()["protected_branches"]}
+    for r in {"origin", remote}:
+        default = default_branch(repo_dir, r)
+        if default:
+            names.add(default.lower())
     return names
+
+
+def is_protected(repo_dir: Path, branch: str, remote: str = "origin") -> bool:
+    return branch.lower() in protected_branches(repo_dir, remote)
 
 
 def _effective_branch(repo_dir: Path, payload: dict) -> str:
@@ -81,24 +92,64 @@ def auto_allowed(atype: str, payload: dict) -> tuple[bool, str]:
     if atype not in ("git_commit", "git_push") or not policy.git_policy()["auto_branch_actions"]:
         return False, ""
     try:
+        return _auto_allowed(atype, payload)
+    except Exception as e:  # git missing / timing out / anything odd: fall back to asking, never crash the task
+        return False, f"无法检查（{type(e).__name__}: {str(e)[:200]}）"
+
+
+def _auto_allowed(atype: str, payload: dict) -> tuple[bool, str]:
+    try:
         repo_dir = repo_dir_of(payload)
-    except (KeyError, RuntimeError) as e:
+    except (KeyError, TypeError, RuntimeError) as e:
         return False, str(e)
+    remote = str(payload.get("remote") or "origin")
+    if atype == "git_push" and not _REMOTE_RE.match(remote):
+        return False, f"远端名不合法：{remote}"
     branch = _effective_branch(repo_dir, payload)
     if not branch:
         return False, "没有指定分支，且仓库当前不在任何分支上（detached HEAD）"
     if not valid_branch(branch):
         return False, f"分支名不是普通分支名：{branch}"
-    if branch in protected_branches(repo_dir):
+    if is_protected(repo_dir, branch, remote):
         return False, f"目标是受保护分支 {branch}（直接动默认分支要你批准；给 branch 写一个新的功能分支名即可自动执行）"
-    if atype == "git_push" and payload.get("remote") and not _REMOTE_RE.match(str(payload["remote"])):
-        return False, f"远端名不合法：{payload['remote']}"
+    if atype == "git_commit":
+        for p in payload.get("paths") or []:
+            full = (repo_dir / str(p)).resolve()
+            if full == repo_dir or full.is_dir():
+                return False, f"路径是目录而不是文件：{p}（自动提交只接受逐个列出的文件）"
     return True, ""
+
+
+_LIT = ["--literal-pathspecs"]  # `*`, `:/`, `:(glob)` ... in an agent's paths are file names, never patterns
+
+
+def files_to_commit(repo_dir: Path, paths: list[str]) -> list[str]:
+    """Every file `add -A -- paths` + `commit -- paths` would record: staged or unstaged changes to tracked files
+    (deletions included) and untracked, non-ignored files. A listed directory expands to the files under it."""
+    out: set[str] = set()
+    for args in (("diff", "--cached", "--name-only", "-z"), ("diff", "--name-only", "-z"),
+                 ("ls-files", "--others", "--exclude-standard", "-z")):
+        p = git(repo_dir, *args, "--", *paths, extra=_LIT)
+        if p.returncode != 0:
+            raise RuntimeError(f"cannot list the files to commit: {p.stderr[-300:]}")
+        out.update(f for f in p.stdout.split("\0") if f)
+    return sorted(out)
+
+
+def _check_commit_files(repo_dir: Path, paths: list[str]) -> list[str]:
+    files = files_to_commit(repo_dir, paths)
+    if not files:
+        raise RuntimeError(f"nothing to commit for the listed paths: {paths[:10]}")
+    bad = [f for f in files if NEVER_COMMIT.search(f)]
+    if bad:
+        raise RuntimeError(f"refusing to commit credential/cache/leftover-like files: {bad[:10]}")
+    return files
 
 
 def commit(payload: dict) -> dict:
     """Commit exactly the listed paths (never `add -A` of the tree) in a repo under the user's work roots; with `branch`
-    the commit goes on that branch, created from the current HEAD when it does not exist yet."""
+    the commit goes on that branch, created from the current HEAD when it does not exist yet. The files that would be
+    committed are checked against NEVER_COMMIT before anything (branch switch, staging) happens."""
     repo_dir = repo_dir_of(payload)
     paths = [str(p) for p in (payload.get("paths") or [])]
     message = (payload.get("message") or "").strip()
@@ -110,6 +161,7 @@ def commit(payload: dict) -> dict:
             raise RuntimeError(f"path escapes the repository: {p}")
         if NEVER_COMMIT.search(p.replace("\\", "/")):
             raise RuntimeError(f"refusing to commit a credential/cache/leftover-like path: {p}")
+    _check_commit_files(repo_dir, paths)
     note = ""
     branch = (payload.get("branch") or "").strip()
     if branch:
@@ -122,10 +174,12 @@ def commit(payload: dict) -> dict:
             if sw.returncode != 0:
                 return {"done": False, "details": f"无法切换到分支 {branch}：{(sw.stdout + sw.stderr)[-600:]}"}
             note = f"（已{'切换到' if exists else '新建并切换到'}分支 {branch}，原分支：{before or 'detached'}）\n"
-    add = git(repo_dir, "add", "-A", "--", *paths)  # -A so deletions of the listed paths are staged too
+            if exists:  # another branch's tree may differ: check again before staging
+                _check_commit_files(repo_dir, paths)
+    add = git(repo_dir, "add", "-A", "--", *paths, extra=_LIT)  # -A so deletions of the listed paths are staged too
     if add.returncode != 0:
         return {"done": False, "details": (add.stdout + add.stderr)[-1500:]}
-    done = git(repo_dir, "commit", "-m", message, "--", *paths)
+    done = git(repo_dir, "commit", "-m", message, "--", *paths, extra=_LIT)
     sha = git(repo_dir, "rev-parse", "--short", "HEAD").stdout.strip()
     return {"done": done.returncode == 0, "details": (note + done.stdout + done.stderr)[-1500:], "commit": sha,
             "branch": current_branch(repo_dir)}
@@ -140,7 +194,9 @@ def push(payload: dict) -> dict:
         raise RuntimeError(f"not a plain remote name: {remote}")
     if not branch or not valid_branch(branch):
         raise RuntimeError(f"git_push needs a plain branch name, got {branch!r}")
-    p = git(repo_dir, "push", "--set-upstream", remote, branch, extra=_credential_args())
+    if git(repo_dir, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode != 0:
+        raise RuntimeError(f"no local branch {branch!r} to push")
+    p = git(repo_dir, "push", "--set-upstream", remote, f"refs/heads/{branch}:refs/heads/{branch}", extra=_credential_args())
     return {"done": p.returncode == 0, "details": (p.stdout + p.stderr)[-1500:], "branch": branch}
 
 

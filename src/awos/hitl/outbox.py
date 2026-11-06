@@ -88,6 +88,8 @@ def create_from_result(task: dict, run_id: str, out: dict) -> list[str]:
                 continue
         if atype in ("git_commit", "git_push"):
             ok, why = gitops.auto_allowed(atype, payload)
+            if ok and ids:  # an earlier decision/action of this result still waits for the human: keep the order
+                ok, why = False, "前面还有等你决定或批准的事项，这一步排在它们之后"
             if ok:  # whiteboard rule: commits/pushes of a non-protected branch need no sign-off (still recorded in the Outbox)
                 aid = repo.create_approval(title=a["title"][:200], kind="action", action_type=atype, task_id=task["id"], run_id=run_id,
                                            context_md=("（白板规则：分支上的 commit / push 默认放行，已自动执行）\n\n```json\n"

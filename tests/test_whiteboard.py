@@ -170,3 +170,74 @@ def test_prompts_tell_agents_the_new_rules():
     text = prompts.EXECUTE + prompts.SECURITY_RULES + prompts.VERIFY
     for needle in ("open_mr", "提交到分支不需要用户批准", "交付前清理", "中间产物", "不能自己创建或合并 MR"):
         assert needle in text, needle
+
+
+# --------------------------------------------------------------------------- review fixes: ways around the rule
+
+
+def test_ref_spellings_of_the_default_branch_still_need_the_human(git_env):
+    from awos import repo as db
+    from awos.hitl import gitops
+    r, remote, main = _repo_with_remote(git_env)
+    _sh(r, "push", "-q", "origin", main)
+    for name in ("HEAD", "refs/heads/" + main, "heads/" + main, main.upper(), "@"):
+        assert not gitops.valid_branch(name) or name == main.upper(), name
+        (aid,) = _proposed("git_push", {"repo": str(r), "remote": "origin", "branch": name})
+        assert db.get_approval(aid)["status"] == "pending", name
+    (r / "a.txt").write_text("5", encoding="utf-8")
+    _sh(r, "commit", "-qam", "local only")
+    assert _sh(remote, "log", "--format=%s", main).splitlines() == ["init"]               # remote main never moved
+
+
+def test_auto_commit_lists_files_and_never_ships_secrets(git_env):
+    from awos import repo as db
+    r, remote, main = _repo_with_remote(git_env)
+    (r / ".env.local").write_text("TOKEN=s3cret", encoding="utf-8")
+    (r / "sub").mkdir()
+    (r / "sub" / "id_rsa").write_text("key", encoding="utf-8")
+    (r / "sub" / "ok.md").write_text("ok", encoding="utf-8")
+    for paths in (["."], ["*"], [":/"], ["sub"]):                                          # whole tree / patterns / dirs
+        (aid,) = _proposed("git_commit", {"repo": str(r), "branch": "agent/x", "paths": paths, "message": "m"})
+        assert db.get_approval(aid)["status"] != "executed", paths
+    assert _sh(r, "branch", "--list", "agent/*") == "" and _sh(r, "rev-parse", "--abbrev-ref", "HEAD") == main
+    for paths in (["."], ["sub"]):                                                          # even when a human approves it
+        a = _approve_action("git_commit", {"repo": str(r), "paths": paths, "message": "m"})
+        assert a["status"] == "failed", paths
+    assert _sh(r, "log", "--format=%s", main).splitlines() == ["init"] and _sh(r, "diff", "--cached", "--name-only") == ""
+    a = _approve_action("git_commit", {"repo": str(r), "paths": ["sub/ok.md"], "message": "m"})
+    assert a["status"] == "executed" and _sh(r, "show", "--name-only", "--format=", "HEAD") == "sub/ok.md"
+
+
+def test_auto_git_waits_behind_an_earlier_pending_action(git_env):
+    from awos import repo as db
+    from awos.engine.actions import add_manual_task
+    from awos.hitl import outbox
+    r, _, main = _repo_with_remote(git_env)
+    (r / "a.txt").write_text("6", encoding="utf-8")
+    task = db.get_task(add_manual_task("t", "d", level=3, category="other"))
+    acts = [{"type": "send_email", "title": "first", "description": "d", "risk": "low", "payload_json": "{}"},
+            {"type": "git_commit", "title": "then commit", "description": "d", "risk": "low",
+             "payload_json": json.dumps({"repo": str(r), "branch": "agent/y", "paths": ["a.txt"], "message": "m"})}]
+    outbox.create_from_result(task, "run_y", {"proposed_actions": acts})
+    by = {a["title"]: a for a in db.list_approvals(task_id=task["id"], limit=10)}
+    assert by["first"]["status"] == "pending" and by["then commit"]["status"] == "pending"
+    assert _sh(r, "branch", "--list", "agent/*") == ""
+
+
+def test_auto_check_errors_fall_back_to_asking(git_env, monkeypatch):
+    from awos import repo as db
+    from awos.hitl import gitops
+    r, _, _ = _repo_with_remote(git_env)
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("git", 1)
+
+    monkeypatch.setattr(gitops, "default_branch", boom)
+    (aid,) = _proposed("git_push", {"repo": str(r), "remote": "origin", "branch": "agent/z"})
+    assert db.get_approval(aid)["status"] == "pending" and "TimeoutExpired" in db.get_approval(aid)["context_md"]
+
+
+def test_policy_keeps_approval_expiry_under_actions():
+    from awos.brain import policy
+    assert policy.approval_expiry_hours("high") == 48 and policy.approval_expiry_hours("low") == 72
+    assert policy.git_policy()["protected_branches"] == ["main", "master"]
