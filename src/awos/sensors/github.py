@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config
+from ..osutil import NO_WINDOW, bundled_or_path
 from ..repo import fingerprint
 from ._common import parse_iso, redact, trunc, utc_iso
 from .base import Sensor, SensorContext, SignalDraft
@@ -18,22 +19,21 @@ ISSUE_FIELDS = "repository,title,url,number,updatedAt,author"
 
 
 def gh_exe() -> Path | None:
-    p = load_config().root / "runtime" / "gh" / "bin" / "gh.exe"
-    return p if p.exists() else None
+    return bundled_or_path(load_config().root / "runtime" / "gh" / "bin" / "gh", "gh")
 
 
 def run_gh(*args: str, timeout: int = 60) -> Any:
     exe = gh_exe()
     if exe is None:
-        raise RuntimeError("gh not installed (runtime/gh)")
+        raise RuntimeError("gh not installed (runtime/gh or PATH)")
     env = {"GH_NO_UPDATE_NOTIFIER": "1", "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
     import os
     cp = subprocess.run([str(exe), *args], capture_output=True, timeout=timeout, env={**os.environ, **env},
-                        creationflags=0x08000000)
+                        **NO_WINDOW)
     out, err = cp.stdout.decode("utf-8", "replace"), cp.stderr.decode("utf-8", "replace")
     if cp.returncode != 0:
         if "gh auth login" in err or "not logged" in err.lower() or "authentication" in err.lower():
-            raise RuntimeError("github: not logged in (run: runtime\\gh\\bin\\gh.exe auth login)")
+            raise RuntimeError(f"github: not logged in (run: {gh_exe()} auth login)")
         raise RuntimeError(f"gh {' '.join(args[:2])} failed: {err.strip()[:300]}")
     return json.loads(out) if out.strip() else []
 
@@ -42,7 +42,7 @@ def logged_in() -> bool:
     exe = gh_exe()
     if exe is None:
         return False
-    return subprocess.run([str(exe), "auth", "status"], capture_output=True, timeout=30, creationflags=0x08000000).returncode == 0
+    return subprocess.run([str(exe), "auth", "status"], capture_output=True, timeout=30, **NO_WINDOW).returncode == 0
 
 
 def _repo(r: Any) -> str:
@@ -56,7 +56,7 @@ class GitHubSensor(Sensor):
 
     def collect(self, ctx: SensorContext) -> list[SignalDraft]:
         if not logged_in():
-            raise RuntimeError("github: not logged in (run: runtime\\gh\\bin\\gh.exe auth login)")
+            raise RuntimeError(f"github: not logged in (run: {gh_exe()} auth login)")
         out: list[SignalDraft] = []
         limit = str(int(ctx.config.get("max_items", 20)))
 

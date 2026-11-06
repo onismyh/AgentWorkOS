@@ -7,11 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config
+from ..osutil import IS_WINDOWS, bundled_or_path
 
 
 def node_exe() -> Path | None:
-    p = load_config().root / load_config().get("paths.node_runtime", "runtime/node") / "node.exe"
-    return p if p.exists() else None
+    """Portable Node under paths.node_runtime (Windows zip: node.exe; macOS/Linux tarball: bin/node), else `node`
+    on PATH (macOS/Linux only: on Windows the system Node is deliberately never used)."""
+    base = load_config().root / load_config().get("paths.node_runtime", "runtime/node")
+    return bundled_or_path(base / "node" if IS_WINDOWS else base / "bin" / "node", "node")
 
 
 def runtime_dir(name: str) -> Path:

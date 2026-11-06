@@ -124,8 +124,9 @@ def test_run_process_cancel_pid_callback_and_utf8_stdin(tmp_path):
 @pytest.mark.live
 def test_live_codex_structured(tmp_path):
     ex = CodexExecutor()
-    ok, _ = ex.available()
-    assert ok
+    ok, why = ex.available()
+    if not ok:
+        pytest.skip(f"codex unavailable: {why}")
     s = spec(tmp_path, prompt="Answer with ok=true.", output_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]})
     res = ex.run(s, lambda *a: None, threading.Event())
     assert res.status == "succeeded" and res.structured == {"ok": True}
@@ -134,6 +135,9 @@ def test_live_codex_structured(tmp_path):
 @pytest.mark.live
 def test_live_claude_denies_write_outside_cwd(tmp_path):
     ex = ClaudeExecutor()
+    ok, why = ex.available()
+    if not ok:
+        pytest.skip(f"claude unavailable: {why}")
     ws = tmp_path / "ws"
     ws.mkdir()
     events = []

@@ -19,6 +19,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from ..osutil import path_basename
 from ..repo import fingerprint
 from ..timeutil import local_today
 from ._common import is_under, local_dt, norm, parse_iso, redact, self_excluded, sqlite_ro, trunc, utc_iso
@@ -157,7 +158,7 @@ def read_mem(db: Path, cutoff: float) -> tuple[list[dict[str, Any]], float | Non
 
 def _resolve_mem_projects(entries: list[dict[str, Any]]) -> None:
     """claude-mem stores project basenames; map them onto full paths seen in Claude/Codex activity."""
-    by_name = {Path(e["project"]).name.lower(): e["project"] for e in entries if e["src"] != "mem" and e["project"]}
+    by_name = {path_basename(e["project"]).lower(): e["project"] for e in entries if e["src"] != "mem" and e["project"]}
     for e in entries:
         if e["src"] == "mem":
             e["project"] = by_name.get(str(e["project"]).lower(), e["project"])
@@ -196,7 +197,7 @@ class AgentHistorySensor(Sensor):
         for (key, day), es in sorted(groups.items()):
             es.sort(key=lambda e: -e["ts"])
             project = display[key]
-            label = Path(project).name or project
+            label = path_basename(project) or project
             prompts = [e for e in es if e["src"] == "claude"]
             codex = [e for e in es if e["src"] == "codex"]
             mem = [e for e in es if e["src"] == "mem"]
@@ -244,7 +245,7 @@ class AgentHistorySensor(Sensor):
                 nc = sum(e["src"] == "claude" for e in es)
                 nx = sum(e["src"] == "codex" for e in es)
                 recent = "；".join(trunc(e["text"], 60) for e in es[:3])
-                lines.append(f"- **{Path(project).name or project}**（{project}）：{nc} 条 Claude 提示、{nx} 个 Codex 线程，"
+                lines.append(f"- **{path_basename(project) or project}**（{project}）：{nc} 条 Claude 提示、{nx} 个 Codex 线程，"
                              f"活跃 {days} 天，最近 {local_dt(es[0]['ts']).strftime('%m-%d %H:%M')}。最近在做：{recent}")
         if mem_last and mem_last < time.time() - 7 * 86400:
             lines.append(f"- claude-mem 记录停在 {local_dt(mem_last).strftime('%Y-%m-%d')}（之后未采集，仅作历史参考）")

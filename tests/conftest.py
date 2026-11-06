@@ -13,3 +13,15 @@ os.environ.setdefault("AWOS_NOTIFY_DISABLE", "1")
 
 def pytest_configure(config) -> None:
     config.addinivalue_line("markers", "live: hits real external services/agents (skipped unless available; run with -m live)")
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    """`live` tests call real agents (and cost money): run them only when asked for with `-m live`."""
+    import pytest
+
+    if "live" in (config.getoption("-m") or ""):
+        return
+    skip = pytest.mark.skip(reason="live test: run with -m live")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip)
