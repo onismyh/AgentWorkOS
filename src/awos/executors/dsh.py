@@ -173,10 +173,16 @@ class DshExecutor(Executor):
         cred = account_credentials()
         writable = [home] + ([] if spec.sandbox == "read-only" else [spec.cwd])
         argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
-                                    exempt=(str(cred),) if cred else ())
+                                    readable=[spec.cwd, *spec.add_dirs],
+                                    # its profile and home patch layers (plugins, `!!js`) and .env (credential fallback) stay as
+                                    # setup left them; DSH itself rewrites the profile's constant root file on every boot
+                                    readonly_within=[home / "profiles", home / "cordis.patch.yml", home / ".env"],
+                                    writable_files=[home / "profiles" / "headless" / "cordis.yml"],
+                                    own_files=[cred] if cred else [])
         pr = run_process(argv, cwd=spec.cwd, stdin_text=schema_prompt(spec.prompt, spec.output_schema),
                          env={**build_env(spec), **sb_env}, timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir,
-                         on_stdout=parser.feed, on_stderr=lambda l: None, on_pid=spec.on_pid)
+                         on_stdout=parser.feed, on_stderr=lambda l: None, on_pid=spec.on_pid,
+                         proxy=not sandbox.enabled())  # confined agents get no localhost, so no local proxy either
         from ..config import load_config
         price = load_config().section("executors.dsh")  # USD per million tokens; DSH reports tokens but no cost
         cost = (parser.tokens_in * float(price.get("usd_per_mtok_in", 0.5)) + parser.tokens_cached * float(price.get("usd_per_mtok_cached", 0.05))

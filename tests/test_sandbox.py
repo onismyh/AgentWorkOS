@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import awos.executors.noderuntime  # noqa: F401  (bound before any test patches awos.config)
 from awos import osutil, runtimes
 from awos.executors import proc, sandbox
 from awos.executors.base import RunSpec
@@ -25,14 +26,27 @@ def _spec(tmp_path: Path, **kw) -> RunSpec:
 
 def test_child_env_drops_credentials_except_the_executors_own(monkeypatch):
     for k, v in {"ANTHROPIC_AUTH_TOKEN": "a", "OPENAI_API_KEY": "o", "GH_TOKEN": "g", "SSH_AUTH_SOCK": "/s",
-                 "AWS_SECRET_ACCESS_KEY": "w", "AWOS_X": "1", "PATH_EXTRA": "keep", "HOME": "/h"}.items():
+                 "AWS_SECRET_ACCESS_KEY": "w", "AWOS_X": "1", "PATH_EXTRA": "keep", "HOME": "/h",
+                 "DATABASE_URL": "postgres://me:pw@db/x", "PLAIN_URL": "https://example.com/a",
+                 "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/bus", "TERM_SESSION_ID": "t1"}.items():
         monkeypatch.setenv(k, v)
-    plain = proc.child_env()
-    assert not {"ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "GH_TOKEN", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "AWOS_X"} & set(plain)
-    assert plain["PATH_EXTRA"] == "keep" and plain["HOME"] == "/h"
-    claude = proc.child_env(keep_secrets=("ANTHROPIC_", "AWS_"))
+    plain = proc.child_env(proxy=False)
+    assert not {"ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "GH_TOKEN", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "AWOS_X",
+                "DATABASE_URL", "TERM_SESSION_ID"} & set(plain)
+    assert plain["PATH_EXTRA"] == "keep" and plain["HOME"] == "/h" and plain["PLAIN_URL"].startswith("https://")
+    assert plain["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/bus"                      # keyring logins on Linux still work
+    claude = proc.child_env(keep_secrets=("ANTHROPIC_", "AWS_"), proxy=False)
     assert claude["ANTHROPIC_AUTH_TOKEN"] == "a" and "AWS_SECRET_ACCESS_KEY" in claude and "OPENAI_API_KEY" not in claude
-    assert proc.child_env({"DEEPSEEK_API_KEY": "d"})["DEEPSEEK_API_KEY"] == "d"           # explicit extras always pass
+    assert proc.child_env({"DEEPSEEK_API_KEY": "d"}, proxy=False)["DEEPSEEK_API_KEY"] == "d"   # explicit extras always pass
+
+
+def test_claude_keeps_cloud_keys_only_when_it_uses_that_cloud(monkeypatch):
+    from awos.executors.claude import keep_env
+    monkeypatch.delenv("CLAUDE_CODE_USE_BEDROCK", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
+    assert keep_env() == ("ANTHROPIC_", "CLAUDE_CODE_")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    assert "AWS_" in keep_env() and "GOOGLE_" not in keep_env()
 
 
 def test_system_proxy_parsing():
@@ -49,19 +63,28 @@ def test_system_proxy_parsing():
     assert osutil.parse_scutil_proxy("<dictionary> {\n  HTTPEnable : 0\n}") == {}
 
 
-def test_secret_paths_cover_keys_and_honour_exemptions():
-    paths = sandbox.secret_paths()
+def test_secret_and_private_paths():
     home = os.path.realpath(os.path.expanduser("~"))
-    assert os.path.join(home, ".ssh") in paths and any(p.endswith("secrets.toml") for p in paths)
-    own = os.path.realpath(os.path.expanduser("~/.dsh/.credentials.yaml"))
-    assert own in paths and own not in sandbox.secret_paths(("~/.dsh/.credentials.yaml",))
+    assert os.path.join(home, ".ssh") in sandbox.secret_paths() and any(p.endswith("secrets.toml") for p in sandbox.secret_paths())
+    assert os.path.join(home, ".claude", ".credentials.json") in sandbox.secret_paths()          # no exemption for anyone
+    from awos.config import load_config
+    priv = sandbox.private_paths()
+    assert os.path.realpath(load_config().path("var")) in priv and os.path.join(home, ".codex") in priv
 
 
 def test_seatbelt_profile_shape(tmp_path):
-    prof = sandbox.seatbelt_profile(writable=[tmp_path / "a b"], deny_read=["/x/\"q"])
-    assert prof.startswith("(version 1)\n(allow default)\n(deny file-write*)")
+    prof = sandbox.seatbelt_profile(writable=[tmp_path / "a b"], readable=[tmp_path / "r"], writable_files=[tmp_path / "f"],
+                                    readonly_within=[tmp_path / "a b" / "profiles"], own_files=[Path("/x/\"q")],
+                                    localhost_ports=[7897])
+    lines = prof.splitlines()
+    assert lines[:3] == ["(version 1)", "(allow default)", "(deny file-write*)"]
     assert f'(subpath "{os.path.realpath(tmp_path / "a b")}")' in prof and '"/x/\\"q"' in prof
-    assert prof.index("(deny file-write*)") < prof.index("(allow file-write*") < prof.index("(deny file-read*")
+    order = [next(i for i, l in enumerate(lines) if l.startswith(p)) for p in
+             ("(allow file-write*", "(deny file-write* (subpath", "(deny file-read* ", "(allow file-read* ", "(deny file-read* file-write*",
+              "(allow file-read* file-write*", '(deny network-outbound (remote ip "localhost:*"))')]
+    assert order == sorted(order)                       # each narrower rule follows the broader one (last match wins)
+    assert '(allow network-outbound (remote ip "localhost:7897"))' in prof and "(deny appleevent-send)" in prof
+    assert "launchservicesd" in prof
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS Seatbelt")
@@ -70,17 +93,31 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
     secret_dir = tmp_path / "home" / ".ssh"
     secret_dir.mkdir(parents=True)
     (secret_dir / "id").write_text("SECRET", encoding="utf-8")
-    monkeypatch.setattr(sandbox, "SECRET_PATHS", (str(secret_dir),))
-    ws, logs, outside = tmp_path / "ws", tmp_path / "logs", tmp_path / "outside.txt"
+    own = tmp_path / "home" / "own-login.json"
+    own.write_text("{}", encoding="utf-8")
+    var = tmp_path / "var"
+    (var / "workspaces" / "other").mkdir(parents=True)
+    (var / "awos.db").write_text("MAIL", encoding="utf-8")
+    monkeypatch.setattr(sandbox, "SECRET_PATHS", (str(secret_dir), str(own)))
+    monkeypatch.setattr(sandbox, "PRIVATE_DATA", ())
+    monkeypatch.setattr(sandbox, "private_paths", lambda: [os.path.realpath(var)])
+    import http.server
+    import threading
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    ws, logs, outside = var / "workspaces" / "mine", tmp_path / "logs", tmp_path / "outside.txt"
     ws.mkdir()
     logs.mkdir()
     probe = tmp_path / "probe.py"
     probe.write_text(textwrap.dedent(f"""
-        import os, tempfile
+        import os, socket, tempfile
         res = {{}}
         for name, fn in [("inside", lambda: open("in.txt", "w").write("ok")),
                          ("outside", lambda: open({str(outside)!r}, "w").write("bad")),
                          ("secret", lambda: open({str(secret_dir / "id")!r}).read()),
+                         ("own_login", lambda: open({str(own)!r}, "w").write("{{}}")),
+                         ("awos_db", lambda: open({str(var / "awos.db")!r}).read()),
+                         ("localhost", lambda: socket.create_connection(("127.0.0.1", {srv.server_port}), timeout=3).close()),
                          ("tmp", lambda: tempfile.NamedTemporaryFile(delete=False).write(b"x"))]:
             try:
                 fn(); res[name] = True
@@ -88,12 +125,14 @@ def test_wrapped_process_writes_only_where_allowed_and_cannot_read_secrets(tmp_p
                 res[name] = False
         print(res)
     """), encoding="utf-8")
-    argv, env = sandbox.wrap([sys.executable, "-I", str(probe)], log_dir=logs, writable=[ws])
+    argv, env = sandbox.wrap([sys.executable, "-I", str(probe)], log_dir=logs, writable=[ws], readable=[ws], own_files=[own])
     assert argv[:2] == [sandbox.SANDBOX_EXEC, "-f"] and env["TMPDIR"].startswith(str(logs / "tmp"))
     lines: list[str] = []
     pr = proc.run_process(argv, cwd=ws, stdin_text=None, timeout_s=60, env=env, on_stdout=lines.append)
     assert pr.exit_code == 0, pr.stderr_tail
-    assert lines[-1] == str({"inside": True, "outside": False, "secret": False, "tmp": True})
+    srv.shutdown()
+    assert lines[-1] == str({"inside": True, "outside": False, "secret": False, "own_login": True, "awos_db": False,
+                             "localhost": False, "tmp": True})
     assert not outside.exists() and (ws / "in.txt").exists()
 
 
@@ -108,16 +147,20 @@ def test_claude_turns_on_its_sandbox_and_denies_credential_reads(tmp_path):
         assert sb["enabled"] and sb["failIfUnavailable"] and not sb["allowUnsandboxedCommands"]
         assert sb["network"]["allowedDomains"] == [] and os.path.realpath(extra) in sb["filesystem"]["denyWrite"]
         assert any(p.endswith("/.ssh") for p in sb["filesystem"]["denyRead"])
-        assert "Read(//" in deny and set(secret_rules()) <= set(deny.split())
+        from awos.config import load_config
+        assert os.path.realpath(load_config().path("var")) in sb["filesystem"]["denyRead"]
+        assert sb["filesystem"]["allowRead"] == [] or all("/var/" in p for p in sb["filesystem"]["allowRead"])
+        assert "Read(//" in deny and set(secret_rules()) <= set(deny.split()) and "api_token)" in deny
     assert settings["disableAllHooks"] is True
     bare = ClaudeExecutor().build_argv(_spec(tmp_path, purpose="triage"))
     assert "--bare" in bare and ("--settings" in bare) == (sys.platform == "darwin")
 
 
 def test_runtime_cli_resolves_without_path(tmp_path, monkeypatch):
-    from awos.config import load_config
+    from types import SimpleNamespace
     monkeypatch.setattr(proc.shutil, "which", lambda name, *a, **k: None)
-    rt = load_config().root / "runtime" / "zz-fake-cli"
+    monkeypatch.setattr("awos.config.load_config", lambda: SimpleNamespace(root=tmp_path))
+    rt = tmp_path / "runtime" / "zz-fake-cli"
     try:
         (rt / "node_modules" / "zz" / "bin").mkdir(parents=True)
         (rt / "node_modules" / ".bin").mkdir(parents=True)
@@ -141,8 +184,11 @@ def test_setup_discovers_credentials_and_never_rewrites_existing_sections(tmp_pa
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    (home / ".pi" / "agent").mkdir(parents=True)
+    (home / ".pi" / "agent" / "auth.json").write_text('{"x": 1}', encoding="utf-8")
     f = runtimes.discover({})
-    assert f.sections["dsh"]["provider"] == "deepseek-account" and "pi" not in f.sections
+    assert f.sections["dsh"]["provider"] == "deepseek-account"
+    assert f.sections["pi"] == {"credentials": str(home / ".pi" / "agent" / "auth.json")}      # the login file, not the dir
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-0123456789")
     f = runtimes.discover({"dsh": {"env": {"DEEPSEEK_API_KEY": "old"}}})
     assert "dsh" not in f.sections and f.sections["pi"] == {"env": {"DEEPSEEK_API_KEY": "sk-test-0123456789"}}
@@ -189,3 +235,40 @@ def test_passthrough_runner_drops_profile_args():
     assert out.returncode == 0 and out.stdout == "a b\n"
     bad = subprocess.run([*PASSTHROUGH_RUNNER, "--ro-bind", "/"], capture_output=True, text=True)
     assert bad.returncode == 125 and "awos-runner:" in bad.stderr
+
+
+def test_codex_profile_hides_private_data_but_keeps_the_runs_own_dirs(tmp_path):
+    from awos.config import load_config
+    from awos.executors.codex import CodexExecutor, profiles_supported
+    assert profiles_supported("codex-cli 0.167.0") and profiles_supported("codex-cli 1.0.0")
+    assert not profiles_supported("codex-cli 0.166.0-alpha.6") and not profiles_supported("codex not found on PATH")
+    var = os.path.realpath(load_config().path("var"))
+    ws = Path(var) / "workspaces" / "t_x"
+    fs = sandbox.codex_filesystem(cwd=ws, log_dir=Path(var) / "runs" / "r", readable=[Path("/opt/ref")], write=False)
+    assert fs[":root"] == "read" and fs[var] == "none" and fs[str(ws)] == "read" and ":workspace_roots" not in fs
+    assert fs[os.path.join(var, "runs", "r", "tmp")] == "write" and fs["/opt/ref"] == "read"
+    assert sandbox.codex_filesystem(cwd=ws, log_dir=tmp_path, readable=[], write=True)[":workspace_roots"] == "write"
+    if sandbox.enabled():
+        import awos.executors.codex as cx
+        old = cx.version_check
+        try:
+            cx.version_check = lambda argv, name, ttl_s=600: (True, "codex-cli 0.150.0")
+            assert CodexExecutor.sandbox_args(_spec(tmp_path)) == ["-s", "read-only"]           # old Codex: coarse but never none
+            cx.version_check = lambda argv, name, ttl_s=600: (True, "codex-cli 0.167.0")
+            (tmp_path / "ü 中").mkdir()
+            args = CodexExecutor.sandbox_args(_spec(tmp_path / "ü 中"))
+            tomllib.loads(args[1].replace("permissions.awos.filesystem=", "x="))                   # valid TOML, non-ASCII kept
+        finally:
+            cx.version_check = old
+
+
+def test_pi_never_uses_the_users_agent_dir(tmp_path, monkeypatch):
+    from awos.executors import pi
+    login = tmp_path / "user-pi" / "auth.json"
+    login.parent.mkdir()
+    login.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(pi, "runtime_secrets", lambda name: {"credentials": str(login)})
+    monkeypatch.setattr(pi, "runtime_dir", lambda name: tmp_path / name)
+    home = pi.prepare_home()
+    assert home == tmp_path / "pi-home" and os.path.realpath(home / "auth.json") == os.path.realpath(login)
+    assert pi.build_env(_spec(tmp_path))["PI_CODING_AGENT_DIR"] == str(home)

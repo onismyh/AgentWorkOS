@@ -94,22 +94,35 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 
 ### 2.3 Agent 沙箱（最小权限）
 
-每个 agent 进程只拿到它这次任务需要的权限（`src/awos/executors/sandbox.py`，`[sandbox]` 配置段）。macOS 不允许 Seatbelt 嵌套，所以自带沙箱的 agent 用它自己的、配好的沙箱，没有沙箱的由 AgentWorkOS 套一层 `sandbox-exec`：
+每个 agent 进程只拿到这次任务需要的权限（`src/awos/executors/sandbox.py`，`[sandbox]` 配置段）。macOS 不允许 Seatbelt 嵌套，所以能把自带沙箱配严的 agent 用它自己的，其余的由 AgentWorkOS 套一层 `sandbox-exec`。四个执行器在 macOS 上都实测过：往工作区外写、读凭据、读 `var/api_token`、连本机 API 全部被拦。
 
-| 执行器 | macOS 上的约束 |
-|---|---|
-| claude | 打开 Claude Code 自带沙箱：Bash 只能写工作区、不能联网、没有"不走沙箱"的后门（`allowUnsandboxedCommands=false`，沙箱起不来就失败）；`--add-dir` 给的目录只读；凭据文件 Read/Edit 一律拒绝 |
-| codex | Codex 权限配置：全盘只读、凭据文件不可读、只能写工作区（只读任务不能写）和本次运行的私有临时目录、命令不能联网 |
-| dsh | 整个 DSH 进程套 AgentWorkOS 的 Seatbelt：只能写工作区（只读任务不能写）、`runtime/dsh-home` 和私有临时目录，凭据文件不可读（自己的登录文件除外）；DSH 自带沙箱只限制写、还放行临时目录，所以在 macOS 上改用外层这个 |
-| pi | Pi 没有沙箱，同上套 Seatbelt；只读任务连 bash 工具都没有 |
+| | 写 | 读 | 网络 |
+|---|---|---|---|
+| 所有执行器 | 只能写本次任务的工作区（只读任务不能写；Claude 的只读任务仍可写自己的草稿工作区）和私有临时目录 | 不能读凭据（`~/.ssh`、`~/.aws`、各 agent 的登录文件、`var/secrets.toml` 等）、AgentWorkOS 的数据（`var/`：数据库里的全部邮件、其他任务的工作区、运行日志、API token）和其他 agent 的历史（`~/.codex`、`~/.claude`、`~/.dsh`、`~/.pi`、邮件/信息）；本次任务的工作区和可读目录除外 | 见下 |
+| claude | Claude Code 自带沙箱：Bash 受上述限制，没有"不走沙箱"的后门（`allowUnsandboxedCommands=false`，沙箱起不来就失败）；Read/Edit 工具对凭据和 `var/` 里最敏感的文件（API token、数据库、日志、备份）另有拒绝规则 | | Bash 不能联网 |
+| codex | Codex 权限配置（`permissions.awos` + `default_permissions`），实测优先于用户配置里的 `sandbox_mode`；Codex 低于 0.167 时退回 `-s read-only/workspace-write` | | 命令不能联网 |
+| dsh | 整个进程套 Seatbelt；自己的配置层（`profiles/`、`cordis.patch.yml`、`.env`）只读，防止一次运行给下一次埋东西 | 自己的账号登录文件可读 | 不能连本机（127.0.0.1/::1），所以拿不到控制台的 token；直连 DeepSeek |
+| pi | 整个进程套 Seatbelt；只能写 `runtime/pi-home` 里的 `bin/`、`tmp/` 和两个缓存文件，设置、MCP 配置、扩展都只读；永远不用你自己的 `~/.pi/agent` | 自己的登录文件（如有）可读写 | 同 dsh |
 
-另外所有执行器的环境变量都会去掉看起来像凭据的变量（`*TOKEN*`、`*KEY*`、`*SECRET*`、`SSH_AUTH_SOCK`、`GH_TOKEN` 等），只保留该执行器自己登录要用的前缀（claude：`ANTHROPIC_`、`CLAUDE_CODE_` 等；codex：`OPENAI_`、`CODEX_`）。`sandbox.deny_read` 可以加更多禁止读取的路径。Windows/Linux 上 codex、dsh 用各自的原生沙箱，claude 在 Linux 上有 bubblewrap 时才开沙箱。
+另外：
+- 套 Seatbelt 的 agent 不能发 AppleEvents、不能调 LaunchServices，所以 `osascript`、`open` 起不了沙箱外的程序。
+- 所有执行器的环境变量都会去掉看起来像凭据的变量：`*TOKEN*`、`*KEY*`、`*SECRET*`、带密码的 URL、`SSH_AUTH_SOCK`、`GH_TOKEN` 等。每个执行器只保留自己登录要用的前缀：claude 是 `ANTHROPIC_`、`CLAUDE_CODE_`，只有配置了 Bedrock/Vertex 时才加上 `AWS_` 或 `GOOGLE_`；codex 是 `OPENAI_`、`CODEX_`。
+- `sandbox.deny_read` 可以再加禁止读取的路径。
+- Windows/Linux 上：codex、dsh 用各自的原生沙箱；claude 在 Linux 上有 bubblewrap 时才开沙箱。
 
 ### 2.4 Git：agent 分支与独立工作区
 
-- 只有 `agent/<主题>` 分支上的 `git_commit` / `git_push` 不需要批准（`config/policy.toml [git]`）。提交在 `var/worktrees/` 下的临时 worktree 里完成，用户当前的分支、暂存区和工作区都不会被切换或改动，提交后 worktree 立即删除。
+- 只有 `agent/<主题>` 分支上的 `git_commit` / `git_push` 不需要批准（`config/policy.toml [git]`）。提交用 git 底层命令直接写到分支上（私有 index → `commit-tree` → 带旧值校验的 `update-ref`），不检出任何东西，所以：
+  - 你当前的分支、暂存区和工作区都不会被切换或改动；
+  - 分支里的符号链接不会把文件写到仓库外；
+  - 不跑 hooks；
+  - 两个提交同时写同一个分支时，后一个会失败而不是把前一个覆盖掉。
 - 其他分支、main/master 和远端默认分支、MR/PR 都要批准。
-- 敏感任务的 git 动作一律要批准：L1/L2 只读任务；私人类别（`routing.private_categories`）；带邮件或私人内容、只能交给可信执行器的任务；来自 `no_auto_sources`（mailmaster、gmail、notion、github）的任务。
+- 敏感任务的 git 动作一律要批准，判断时会沿着上级任务一路往上查，所以拆出来的子任务也算：
+  - 实际层级（按类别上限算）是 L1/L2 或只读沙箱的任务；
+  - 私人类别（`routing.private_categories`）的任务；
+  - 带邮件或私人内容、只能交给可信执行器的任务；
+  - 来自 `no_auto_sources`（mailmaster、gmail、notion、github）的任务。
 
 ## 3. 日志和数据在哪里
 

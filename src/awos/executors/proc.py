@@ -39,19 +39,22 @@ class ProcResult:
 
 # Env vars that look like credentials (tokens, keys, ssh-agent / gh auth ...) are not inherited by agents: each executor
 # keeps only the prefixes it needs for its own login (see `keep_secrets`); everything else it needs is passed explicitly.
-_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION", re.I)
+_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION_?(ID|KEY|TOKEN)\b", re.I)
+_URL_CREDS = re.compile(r"://[^/\s:@]+:[^/\s@]+@")   # scheme://user:password@host (DATABASE_URL, proxy URLs, ...)
 
 
-def child_env(extra: dict[str, str] | None = None, *, keep_secrets: tuple[str, ...] = ()) -> dict[str, str]:
-    """Inherited env minus our own AWOS_* settings and minus credential-looking variables (except the `keep_secrets`
-    prefixes), forced UTF-8 / no colour, then caller overrides."""
+def child_env(extra: dict[str, str] | None = None, *, keep_secrets: tuple[str, ...] = (), proxy: bool = True) -> dict[str, str]:
+    """Inherited env minus our own AWOS_* settings and minus credential-looking variables (by name, or a URL with an
+    embedded password; except the `keep_secrets` prefixes), forced UTF-8 / no colour, the macOS system proxy (unless
+    `proxy=False`), then caller overrides."""
     keep = tuple(p.upper() for p in keep_secrets)
     env = {k: v for k, v in os.environ.items()
-           if not k.upper().startswith("AWOS_") and (not _SECRETISH.search(k) or k.upper().startswith(keep))}
+           if not k.upper().startswith("AWOS_")
+           and (not (_SECRETISH.search(k) or _URL_CREDS.search(v or "")) or k.upper().startswith(keep))}
     env.update(PYTHONUTF8="1", NO_COLOR="1")
     from ..config import load_config
     from ..osutil import system_proxy
-    if load_config().get("network.use_system_proxy", True):
+    if proxy and load_config().get("network.use_system_proxy", True):
         env.update(system_proxy())
     env.update({str(k): str(v) for k, v in (extra or {}).items()})
     return env
@@ -236,7 +239,7 @@ def run_process(argv: list[str], *, cwd: Path, stdin_text: str | None, timeout_s
                 cancel: threading.Event | None = None, log_dir: Path | None = None, env: dict[str, str] | None = None,
                 on_stdout: LineSink | None = None, on_stderr: LineSink | None = None,
                 on_pid: Callable[[int], None] | None = None, stdout_name: str = "stdout.jsonl",
-                stderr_name: str = "stderr.log", keep_secrets: tuple[str, ...] = ()) -> ProcResult:
+                stderr_name: str = "stderr.log", keep_secrets: tuple[str, ...] = (), proxy: bool = True) -> ProcResult:
     """Run argv to completion. stdin_text is written as UTF-8 then stdin is closed; stdout/stderr are streamed
     line by line to the callbacks and tee'd raw to log_dir. Timeout or cancel kills the whole process tree."""
     cancel = cancel or threading.Event()
@@ -244,7 +247,7 @@ def run_process(argv: list[str], *, cwd: Path, stdin_text: str | None, timeout_s
         log_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     try:
-        proc = subprocess.Popen(argv, cwd=str(cwd), env=child_env(env, keep_secrets=keep_secrets), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, cwd=str(cwd), env=child_env(env, keep_secrets=keep_secrets, proxy=proxy), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, creationflags=_FLAGS, start_new_session=not IS_WINDOWS)
     except OSError as e:
         return ProcResult(exit_code=None, spawn_error=f"spawn failed: {e}", stderr_tail=str(e))

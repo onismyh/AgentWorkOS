@@ -6,7 +6,7 @@
 * Finds credentials that already exist on the machine and wires them up without copying secrets around more than needed:
     codex  ~/.codex/auth.json (ChatGPT login, shared with the Codex app/CLI); else OPENAI_API_KEY -> `codex login --with-api-key`
     dsh    DEEPSEEK_API_KEY -> var/secrets.toml [dsh] env; else the DeepSeek Harness account login (~/.dsh/.credentials.yaml)
-    pi     DEEPSEEK_API_KEY -> var/secrets.toml [pi] env; else an existing Pi login (~/.pi/agent/auth.json)
+    pi     DEEPSEEK_API_KEY -> var/secrets.toml [pi] env; else an existing Pi login (~/.pi/agent/auth.json, linked)
   Existing var/secrets.toml sections are never modified; the file is created/appended with mode 0600. Keys are never printed.
 """
 from __future__ import annotations
@@ -108,7 +108,7 @@ class Found:
 
 
 def _mask(v: str) -> str:
-    return f"{v[:3]}…{v[-2:]}" if len(v) > 8 else "…"
+    return f"…{v[-2:]}, {len(v)} chars" if len(v) > 8 else "set"
 
 
 def _home() -> Path:
@@ -168,8 +168,8 @@ def discover(secrets: dict) -> Found:
         f.sections["pi"] = {"env": {"DEEPSEEK_API_KEY": deepseek}}
         f.lines.append(f"pi: DEEPSEEK_API_KEY from the environment ({_mask(deepseek)})")
     elif (d := pi_login_dir()) is not None:
-        f.sections["pi"] = {"agent_dir": str(d)}
-        f.lines.append(f"pi: existing Pi login found ({d})")
+        f.sections["pi"] = {"credentials": str(d / "auth.json")}
+        f.lines.append(f"pi: existing Pi login found ({d / 'auth.json'}) - linked, the rest of ~/.pi stays private")
     else:
         f.lines.append("pi: no credentials - set DEEPSEEK_API_KEY (a DeepSeek platform API key) and re-run setup")
     return f
@@ -226,6 +226,20 @@ def seed_pi_settings(log=print) -> None:
     log("    pi: runtime/pi-home/settings.json written")
 
 
+def init_dsh_profile(log=print) -> None:
+    """Create DSH's headless profile in runtime/dsh-home now (trusted, outside any sandbox): agent runs may not write it."""
+    from .executors import dsh
+    from .executors.noderuntime import node_exe
+    node = node_exe()
+    if node is None or not dsh.entry().exists() or (runtime_dir("dsh-home") / "profiles" / "headless").is_dir():
+        return
+    runtime_dir("dsh-home").mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "DSH_HOME": str(runtime_dir("dsh-home")), "DSH_TELEMETRY_DISABLED": "1", "DSH_TELEMETRY_MODE": "DISABLED"}
+    cp = subprocess.run([str(node), str(dsh.entry()), "--profile", "headless", "--dump-config"], capture_output=True, text=True,
+                        timeout=300, env=env, stdin=subprocess.DEVNULL, **NO_WINDOW)
+    log(f"    dsh: headless profile {'created' if cp.returncode == 0 else 'not created: ' + cp.stderr[-300:]}")
+
+
 def setup(*, install: bool = True, credentials: bool = True, only: list[str] | None = None, log=print) -> int:
     ok = True
     if install:
@@ -235,6 +249,7 @@ def setup(*, install: bool = True, credentials: bool = True, only: list[str] | N
                 continue
             ok = install_runtime(name, spec, log=log) and ok
         seed_pi_settings(log)
+        init_dsh_profile(log)
     if credentials:
         log("==> credentials")
         cfg = load_config()

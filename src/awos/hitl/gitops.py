@@ -1,7 +1,8 @@
 """Git actions the Outbox runs on an agent's behalf, and the whiteboard rule for when no human sign-off is needed.
 
-Rule: agents may commit and push their own `agent/<topic>` branches without asking. Such commits are made in a separate
-git worktree under var/worktrees, so the user's checkout, index and working tree are never switched or touched. Everything
+Rule: agents may commit and push their own `agent/<topic>` branches without asking. Such commits are built with git
+plumbing (private index, commit-tree, compare-and-swap update-ref), so the user's checkout, index and working tree are
+never switched or touched and nothing is checked out anywhere. Everything
 else stays with the human: other branches, the default/protected branches, force pushes, history rewrites, merge/pull
 requests (MR/PR), and every git action of a sensitive task (mail / notes / external issues, private categories, L1-L2).
 """
@@ -10,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -96,8 +97,25 @@ def sensitivity(task: dict | None) -> str | None:
     if not task:
         return None
     g = policy.git_policy()
-    if int(task.get("level") or 0) < g["auto_min_level"]:
-        return f"L{task.get('level')} 是只读层级的任务，不应自己提交"
+    dec = policy.decide(task)     # the effective level after category caps, and the sandbox the run really had
+    if dec.level < g["auto_min_level"] or dec.sandbox == "read-only":
+        return f"L{dec.level} 是只读层级的任务，不应自己提交"
+    from .. import repo
+    seen = {task["id"]} if task.get("id") else set()
+    for up in (task.get("parent_id"), task.get("root_id")):
+        while up and up not in seen and len(seen) < 12:   # a subtask inherits where its parents' content came from
+            seen.add(up)
+            parent = repo.get_task(up)
+            if not parent:
+                break
+            why = _own_sensitivity(parent, g)
+            if why:
+                return f"上级任务：{why}"
+            up = parent.get("parent_id")
+    return _own_sensitivity(task, g)
+
+
+def _own_sensitivity(task: dict, g: dict) -> str | None:
     meta = task.get("meta") or {}
     if (meta.get("routing") or {}).get("trusted_only"):
         return "任务带有邮件或私人内容"
@@ -165,7 +183,7 @@ def files_to_commit(repo_dir: Path, paths: list[str]) -> list[str]:
     """Every file `add -A -- paths` + `commit -- paths` would record: staged or unstaged changes to tracked files
     (deletions included) and untracked, non-ignored files. A listed directory expands to the files under it."""
     out: set[str] = set()
-    for args in (("diff", "--cached", "--name-only", "-z"), ("diff", "--name-only", "-z"),
+    for args in (("diff", "--cached", "--no-renames", "--name-only", "-z"), ("diff", "--no-renames", "--name-only", "-z"),
                  ("ls-files", "--others", "--exclude-standard", "-z")):
         p = git(repo_dir, *args, "--", *paths, extra=_LIT)
         if p.returncode != 0:
@@ -205,7 +223,7 @@ def commit(payload: dict) -> dict:
         if not valid_branch(branch):
             raise RuntimeError(f"not a plain branch name: {branch}")
         if branch != current_branch(repo_dir):
-            return _commit_in_worktree(repo_dir, branch, files, message)
+            return _commit_to_branch(repo_dir, branch, files, message)
     note = ""
     add = git(repo_dir, "add", "-A", "--", *paths, extra=_LIT)  # -A so deletions of the listed paths are staged too
     if add.returncode != 0:
@@ -216,52 +234,72 @@ def commit(payload: dict) -> dict:
             "branch": current_branch(repo_dir)}
 
 
-def worktree_path(repo_dir: Path, branch: str) -> Path:
-    tag = hashlib.sha1(str(repo_dir).encode("utf-8")).hexdigest()[:8]
-    return load_config().path("var") / "worktrees" / f"{repo_dir.name}-{tag}" / branch.replace("/", "__")
-
-
-def _commit_in_worktree(repo_dir: Path, branch: str, files: list[str], message: str) -> dict:
-    """Commit `files` (as they are in the user's working tree) onto `branch` in a throw-away worktree: the user's
-    checkout, index and working tree stay exactly as they were. The branch is created from HEAD if it does not exist."""
-    wt = worktree_path(repo_dir, branch)
-    git(repo_dir, "worktree", "prune")
-    if wt.exists():
-        git(repo_dir, "worktree", "remove", "--force", str(wt))
-        shutil.rmtree(wt, ignore_errors=True)
-    wt.parent.mkdir(parents=True, exist_ok=True)
-    exists = git(repo_dir, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
-    add = (git(repo_dir, "worktree", "add", "--quiet", str(wt), branch) if exists
-           else git(repo_dir, "worktree", "add", "--quiet", "-b", branch, str(wt), "HEAD"))
-    if add.returncode != 0:
-        return {"done": False, "details": f"无法为分支 {branch} 建立独立工作区：{(add.stdout + add.stderr)[-600:]}"}
+def _blob(repo_dir: Path, rel: str) -> tuple[str, str] | None:
+    """(mode, sha) of a working-tree entry written into the object store, with the clean filters `git add` would apply
+    for that path (CRLF, LFS, ...); None if it is gone. Never follows a symlink: a link is stored as a link."""
+    path = repo_dir / rel
     try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        p = subprocess.run(["git", "-C", str(repo_dir), "hash-object", "-w", "--stdin"], input=os.fsencode(os.readlink(path)),
+                           capture_output=True, timeout=60, **NO_WINDOW)
+        mode = "120000"
+    elif stat.S_ISREG(st.st_mode):
+        p = subprocess.run(["git", "-C", str(repo_dir), "hash-object", "-w", "--path", rel, "--", str(path)],
+                           capture_output=True, timeout=300, **NO_WINDOW)
+        mode = "100755" if st.st_mode & 0o111 else "100644"
+    else:
+        raise RuntimeError(f"not a regular file or symlink: {path}")
+    if p.returncode != 0:
+        raise RuntimeError(f"git hash-object failed for {path}: {p.stderr.decode('utf-8', 'replace')[-300:]}")
+    return mode, p.stdout.decode().strip()
+
+
+def _commit_to_branch(repo_dir: Path, branch: str, files: list[str], message: str) -> dict:
+    """Commit `files` (as they are in the user's working tree) onto `branch` without checking anything out: a private
+    index built from the branch tip (or HEAD for a new branch), the files' blobs, `commit-tree`, then a compare-and-swap
+    `update-ref`. Nothing in the user's checkout, index or working tree changes, nothing is written anywhere through the
+    branch's tree (no symlink can redirect a write), no hooks run, and a concurrent commit to the same branch fails cleanly
+    instead of being lost."""
+    ref = f"refs/heads/{branch}"
+    tip = git(repo_dir, "rev-parse", "--verify", "--quiet", ref).stdout.strip()
+    base = tip or git(repo_dir, "rev-parse", "--verify", "--quiet", "HEAD").stdout.strip()
+    if not base:
+        return {"done": False, "details": "仓库还没有任何提交，无法从 HEAD 新建分支"}
+    tmp_dir = load_config().path("var") / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    index = tmp_dir / f"git-index-{os.getpid()}-{hashlib.sha1((str(repo_dir) + branch).encode()).hexdigest()[:8]}"
+    env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    run = lambda *a, **k: subprocess.run(["git", "-C", str(repo_dir), *a], capture_output=True, text=True,  # noqa: E731
+                                        encoding="utf-8", errors="replace", timeout=300, env=env, **NO_WINDOW, **k)
+    try:
+        r = run("read-tree", base)
+        if r.returncode != 0:
+            return {"done": False, "details": r.stderr[-600:]}
         for f in files:
-            src, dst = repo_dir / f, wt / f
-            if src.is_symlink() or src.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if dst.is_symlink() or dst.is_file():
-                    dst.unlink()
-                if src.is_symlink():
-                    os.symlink(os.readlink(src), dst)
-                else:
-                    shutil.copy2(src, dst)
-            elif dst.is_symlink() or dst.exists():
-                dst.unlink()
-        st = git(wt, "add", "-A", "--", *files, extra=_LIT)
-        if st.returncode != 0:
-            return {"done": False, "details": (st.stdout + st.stderr)[-1500:]}
-        if git(wt, "diff", "--cached", "--quiet", "--", *files, extra=_LIT).returncode == 0:
-            sha = git(wt, "rev-parse", "--short", "HEAD").stdout.strip()
-            return {"done": True, "details": f"分支 {branch} 上这些文件已经是最新，没有新的提交", "commit": sha, "branch": branch}
-        done = git(wt, "commit", "-m", message, "--", *files, extra=_LIT)
-        sha = git(wt, "rev-parse", "--short", "HEAD").stdout.strip()
-        note = f"（在独立工作区提交到分支 {branch}{'' if exists else '（新建自当前 HEAD）'}；你的工作区没有被切换或改动）\n"
-        return {"done": done.returncode == 0, "details": (note + done.stdout + done.stderr)[-1500:], "commit": sha, "branch": branch}
+            entry = _blob(repo_dir, f)
+            r = (run("update-index", "--add", "--cacheinfo", f"{entry[0]},{entry[1]},{f}") if entry
+                 else run("update-index", "--force-remove", "--", f))
+            if r.returncode != 0:
+                return {"done": False, "details": r.stderr[-600:]}
+        tree = run("write-tree").stdout.strip()
+        if tree == run("rev-parse", f"{base}^{{tree}}").stdout.strip():
+            return {"done": True, "details": f"分支 {branch} 上这些文件已经是最新，没有新的提交", "commit": base[:12], "branch": branch}
+        c = run("commit-tree", tree, "-p", base, input=message)
+        if c.returncode != 0:
+            return {"done": False, "details": c.stderr[-600:]}
+        sha = c.stdout.strip()
+        u = run("update-ref", "-m", f"awos: {message.splitlines()[0][:80]}", ref, sha, tip or "0" * 40)
+        if u.returncode != 0:
+            return {"done": False, "details": f"分支 {branch} 在提交期间被改动，未写入：{u.stderr[-400:]}"}
+        note = (f"（直接提交到分支 {branch}{'' if tip else '（新建自当前 HEAD）'}，没有检出任何东西；"
+                "你的分支、暂存区和工作区都没有被改动）\n")
+        return {"done": True, "details": note + f"{sha[:12]} {message.splitlines()[0][:200]}", "commit": sha[:12], "branch": branch}
     finally:
-        git(repo_dir, "worktree", "remove", "--force", str(wt))
-        shutil.rmtree(wt, ignore_errors=True)
-        git(repo_dir, "worktree", "prune")
+        index.unlink(missing_ok=True)
+        Path(str(index) + ".lock").unlink(missing_ok=True)
 
 
 def push(payload: dict) -> dict:

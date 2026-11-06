@@ -187,7 +187,9 @@ try {
     if (-not $SkipNode) {
         Write-Step 'agent runtimes + credentials (awos setup: codex / pi / dsh into runtime\, keys found on this machine)'
         Push-Location -LiteralPath $Root
-        try { Invoke-Native $VenvPy @('-X', 'utf8', '-m', 'awos.cli', 'setup') } finally { Pop-Location }
+        try { Invoke-Native $VenvPy @('-X', 'utf8', '-m', 'awos.cli', 'setup') }
+        catch { Write-Warning "awos setup reported problems ($($_.Exception.Message)); re-run: scripts\awos.cmd setup" }
+        finally { Pop-Location }
     }
 
     if ($AddToPath) { Write-Step 'user PATH'; Add-ScriptsToUserPath }

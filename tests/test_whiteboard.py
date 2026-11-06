@@ -301,3 +301,45 @@ def test_untouched_default_rule_is_updated_but_user_edits_stay(client):
     repo.upsert_fact("rule", "Git 交付权限", "我自己的写法", source="user", actor="user", pinned=True)
     whiteboard.ensure_defaults()
     assert {f["key"]: f["value"] for f in whiteboard.rules()}["Git 交付权限"] == "我自己的写法"
+
+
+def test_agent_commit_never_writes_through_the_branch_tree_and_keeps_renames(git_env, tmp_path):
+    from awos.hitl import gitops
+    r, _, main = _repo_with_remote(git_env)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _sh(r, "switch", "-q", "-c", "agent/x")                     # the agent branch has `docs` as a symlink pointing outside
+    (r / "docs").symlink_to(outside)
+    _sh(r, "add", "docs")
+    _sh(r, "commit", "-qm", "link")
+    _sh(r, "switch", "-q", main)
+    (r / "docs").mkdir()
+    (r / "docs" / "new.txt").write_text("n", encoding="utf-8")
+    out = gitops.commit({"repo": str(r), "branch": "agent/x", "paths": ["docs/new.txt"], "message": "m"})
+    assert list(outside.iterdir()) == [], out                     # nothing was written through the link
+    _sh(r, "mv", "a.txt", "b.txt")                                # a staged rename stays a rename, not a copy
+    out = gitops.commit({"repo": str(r), "branch": "agent/r", "paths": ["a.txt", "b.txt"], "message": "mv"})
+    assert out["done"], out
+    assert _sh(r, "ls-tree", "--name-only", "agent/r").split() == ["b.txt"]
+    assert _sh(r, "rev-parse", "--abbrev-ref", "HEAD") == main and _sh(r, "diff", "--cached", "--no-renames", "--name-only").split() == ["a.txt", "b.txt"]
+    again = gitops.commit({"repo": str(r), "branch": "agent/r", "paths": ["b.txt"], "message": "again"})
+    assert again["done"] and "没有新的提交" in again["details"]
+
+
+def test_subtasks_and_capped_tasks_inherit_sensitivity(git_env):
+    from awos import db as rawdb
+    from awos import repo
+    from awos.hitl import gitops
+    r, _, _ = _repo_with_remote(git_env)
+    payload = {"repo": str(r), "branch": "agent/s", "paths": ["a.txt"], "message": "m"}
+    rawdb.insert("signals", {"id": "sig_gm", "source": "gmail", "fingerprint": "f2", "title": "邮件", "payload": "{}",
+                             "observed_at": rawdb.utcnow()})
+    parent = _task_with(meta={"signals": ["sig_gm"]})
+    child = repo.get_task(repo.create_task("拆出来的子任务", parent_id=parent["id"], level=4, category="dev", status="ready",
+                                           source="subtask"))
+    ok, why = gitops.auto_allowed("git_commit", payload, task=child)
+    assert not ok and "上级任务" in why and "gmail" in why
+    capped = _task_with(level=4)
+    repo.update_task(capped["id"], level_cap=2)
+    ok, why = gitops.auto_allowed("git_commit", payload, task=repo.get_task(capped["id"]))
+    assert not ok and "L2" in why

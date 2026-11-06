@@ -36,9 +36,31 @@ def build_argv(spec: RunSpec, model: str | None) -> list[str]:
 
 
 def pi_home() -> Path:
-    """Pi's agent dir: an existing login the user pointed setup at ([pi] agent_dir), else runtime/pi-home."""
-    d = runtime_secrets("pi").get("agent_dir")
-    return Path(os.path.expanduser(str(d))) if d else runtime_dir("pi-home")
+    """Pi's agent dir: always AgentWorkOS's own runtime/pi-home (never the user's ~/.pi/agent, whose extensions and
+    settings an interactive `pi` would load unsandboxed)."""
+    return runtime_dir("pi-home")
+
+
+def login_file() -> Path | None:
+    """An existing Pi login setup pointed at ([pi] credentials), linked into pi-home as auth.json."""
+    p = runtime_secrets("pi").get("credentials")
+    if not p:
+        return None
+    p = Path(os.path.expanduser(str(p)))
+    return p if p.is_file() else None
+
+
+def prepare_home() -> Path:
+    home = pi_home()
+    home.mkdir(parents=True, exist_ok=True)
+    src = login_file()
+    if src is not None:
+        dst = home / "auth.json"
+        if not (dst.is_symlink() and os.path.realpath(dst) == os.path.realpath(src)):
+            if dst.is_symlink() or dst.exists():
+                dst.unlink()
+            dst.symlink_to(src)
+    return home
 
 
 def build_env(spec: RunSpec) -> dict[str, str]:
@@ -131,13 +153,20 @@ class PiExecutor(Executor):
         parser = PiParser(on_event)
         prompt = schema_prompt(spec.prompt, spec.output_schema)
         from . import sandbox
-        home = pi_home()
-        home.mkdir(parents=True, exist_ok=True)
-        writable = [home] + ([] if spec.sandbox == "read-only" else [spec.cwd])
-        argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable, exempt=(str(home / "auth.json"),))
+        home = prepare_home()
+        auth = Path(os.path.realpath(home / "auth.json"))
+        # Pi may write its tool downloads, scratch and caches, and refresh its own login; not its settings, MCP config,
+        # extensions, prompts or skills (a run must not plant what the next run loads).
+        writable = [home / "bin", home / "tmp"] + ([] if spec.sandbox == "read-only" else [spec.cwd])
+        for d in writable[:2]:
+            d.mkdir(parents=True, exist_ok=True)
+        argv, sb_env = sandbox.wrap(build_argv(spec, model), log_dir=spec.log_dir, writable=writable,
+                                    readable=[spec.cwd, home, *spec.add_dirs],
+                                    writable_files=[home / "models-store.json", home / "mcp.log"],
+                                    own_files=[auth, auth.with_name(auth.name + ".lock")])
         pr = run_process(argv, cwd=spec.cwd, stdin_text=prompt, env={**build_env(spec), **sb_env},
                          timeout_s=spec.timeout_s, cancel=cancel, log_dir=spec.log_dir, on_stdout=parser.feed,
-                         on_stderr=lambda l: None, on_pid=spec.on_pid)
+                         on_stderr=lambda l: None, on_pid=spec.on_pid, proxy=not sandbox.enabled())  # no localhost when confined
         base: dict[str, Any] = dict(exit_code=pr.exit_code, final_text=parser.final_text, tokens_in=parser.tokens_in,
                                     tokens_out=parser.tokens_out, cost_usd=parser.cost, model=parser.model or model,
                                     session_id=parser.session_id)

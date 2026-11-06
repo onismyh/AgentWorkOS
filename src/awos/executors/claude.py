@@ -51,17 +51,28 @@ def _rules(prefixes: list[str], exact: tuple[str, ...] = ()) -> list[str]:
 
 SAFE_SHELL = _rules(_SAFE_PREFIXES, exact=("pwd", "git remote -v")) + ["Bash(git remote -v)", "PowerShell(git remote -v)"]
 DENY_SHELL = _rules(_DENY_PREFIXES)
-# Credential-like env Claude Code itself may need (API / gateway / Bedrock / Vertex login); all others are scrubbed.
-KEEP_ENV = ("ANTHROPIC_", "CLAUDE_CODE_", "AWS_", "GOOGLE_", "VERTEX_", "CLOUD_ML_")
+def keep_env() -> tuple[str, ...]:
+    """Credential-like env Claude Code itself needs: its API / gateway login, plus cloud credentials only when it is
+    actually configured to use Bedrock / Vertex. Everything else is scrubbed (and so never reaches its shell)."""
+    keep = ("ANTHROPIC_", "CLAUDE_CODE_")
+    if os.environ.get("CLAUDE_CODE_USE_BEDROCK"):
+        keep += ("AWS_",)
+    if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
+        keep += ("GOOGLE_", "VERTEX_", "CLOUD_ML_")
+    return keep
 
 
 def secret_rules() -> list[str]:
-    """Read/Edit deny rules for credential files (also merged into the sandbox's denyRead for shell commands)."""
+    """Read/Edit deny rules for credential files and AgentWorkOS's most sensitive data (the sandbox's denyRead covers the
+    shell). Claude Code's own login is not exempt: these rules bind the agent's tools, not Claude Code itself."""
     if os.name != "posix":  # Windows: no OS sandbox for Claude Code there; path-rule syntax for drive letters unverified
         return []
+    var = load_config().path("var")
+    paths = [*sandbox.secret_paths(), *(os.path.realpath(var / n) for n in ("api_token", "awos.db", "awos.db-wal", "awos.db-shm",
+                                                                         "backups", "runs", "logs", "context"))]
     out = []
-    for p in sandbox.secret_paths(("~/.claude/.credentials.json",)):
-        pat = "//" + p.lstrip("/") + ("" if os.path.isfile(p) else "/**")
+    for p in dict.fromkeys(paths):
+        pat = "//" + p.lstrip("/") + ("" if os.path.isfile(p) or os.path.basename(p).startswith(("awos.db", "api_token")) else "/**")
         out += [f"Read({pat})", f"Edit({pat})"]
     return out
 
@@ -162,7 +173,7 @@ class ClaudeExecutor(Executor):
     def run(self, spec: RunSpec, on_event: EventSink, cancel: threading.Event) -> RunResult:
         parser = ClaudeParser(on_event)
         pr = run_process(self.build_argv(spec), cwd=spec.cwd, stdin_text=spec.prompt, timeout_s=spec.timeout_s, cancel=cancel,
-                         log_dir=spec.log_dir, env=spec.env, on_stdout=parser.feed, on_pid=spec.on_pid, keep_secrets=KEEP_ENV)
+                         log_dir=spec.log_dir, env=spec.env, on_stdout=parser.feed, on_pid=spec.on_pid, keep_secrets=keep_env())
         res = parser.result or {}
         usage = res.get("usage") or {}
         final = res.get("result") if isinstance(res.get("result"), str) else "\n".join(parser.texts)

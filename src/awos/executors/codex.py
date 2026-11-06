@@ -129,6 +129,14 @@ class CodexParser:
 
 
 KEEP_ENV = ("OPENAI_", "CODEX_", "AZURE_OPENAI_")  # credential-like env Codex itself may need; all others are scrubbed
+PROFILES_SINCE = (0, 167)  # permission profiles (filesystem deny / per-path grants) verified from this Codex version on
+
+
+def profiles_supported(version_text: str) -> bool:
+    """`codex-cli 0.167.0` -> True. Older or unparsable: fall back to the coarse -s modes (never to no sandbox)."""
+    import re
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_text or "")
+    return bool(m) and (int(m.group(1)), int(m.group(2))) >= PROFILES_SINCE
 
 
 class CodexExecutor(Executor):
@@ -162,15 +170,11 @@ class CodexExecutor(Executor):
         """macOS: a Codex permission profile (Seatbelt) for the agent's commands: read the disk except credential files,
         write only the workspace (write runs) and a private per-run TMPDIR, no network. Elsewhere: Codex's -s modes."""
         from . import sandbox
-        if not sandbox.enabled():
-            return ["-s", "read-only" if spec.sandbox == "read-only" else "workspace-write"]
-        fs = {":root": "read"}
-        if spec.sandbox != "read-only":
-            fs[":workspace_roots"] = "write"
-        fs[str(spec.log_dir / "tmp")] = "write"
-        for p in sandbox.secret_paths():
-            fs[p] = "none"
-        body = ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in fs.items())
+        mode = "read-only" if spec.sandbox == "read-only" else "workspace-write"
+        if not sandbox.enabled() or not profiles_supported(version_check(EXECUTOR._argv(), "codex")[1]):
+            return ["-s", mode]
+        fs = sandbox.codex_filesystem(cwd=spec.cwd, log_dir=spec.log_dir, readable=list(spec.add_dirs), write=mode != "read-only")
+        body = ", ".join(f"{json.dumps(k, ensure_ascii=False)} = {json.dumps(v)}" for k, v in fs.items())
         return ["-c", f"permissions.awos.filesystem={{{body}}}", "-c", 'default_permissions="awos"']
 
     def run(self, spec: RunSpec, on_event: EventSink, cancel: threading.Event) -> RunResult:
