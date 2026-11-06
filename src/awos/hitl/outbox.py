@@ -4,9 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import shutil
-import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +16,7 @@ from ..config import load_config
 from ..db import dumps, utcnow
 from ..models import ApprovalStatus, TaskStatus
 from ..timeutil import local_now
+from . import gitops
 
 log = logging.getLogger("awos.outbox")
 
@@ -87,6 +86,19 @@ def create_from_result(task: dict, run_id: str, out: dict) -> list[str]:
                 repo.decide_approval(aid, "approve", via="auto", actor="system")
                 execute_action(repo.get_approval(aid))
                 continue
+        if atype in ("git_commit", "git_push"):
+            ok, why = gitops.auto_allowed(atype, payload)
+            if ok:  # whiteboard rule: commits/pushes of a non-protected branch need no sign-off (still recorded in the Outbox)
+                aid = repo.create_approval(title=a["title"][:200], kind="action", action_type=atype, task_id=task["id"], run_id=run_id,
+                                           context_md=("（白板规则：分支上的 commit / push 默认放行，已自动执行）\n\n```json\n"
+                                                       f"{json.dumps(payload, ensure_ascii=False, indent=2)[:1500]}\n```"),
+                                           options=ACTION_OPTIONS, risk="low", payload={**payload, "_hash": payload_hash(payload)})
+                repo.decide_approval(aid, "approve", via="auto", actor="system")
+                execute_action(repo.get_approval(aid))
+                continue
+            if why:
+                risk = "high" if "受保护分支" in why else risk
+                notes.append(f"⚠️ 不能自动执行，需要你批准：{why}")
         if not policy.needs_approval(atype):
             continue
         ctx = (f"{a.get('description', '')}\n\n" + ("\n".join(notes) + "\n\n" if notes else "") +
@@ -239,10 +251,12 @@ def execute_action(approval: dict) -> dict:
         atype = approval.get("action_type") or "other"
         if atype == "apply_to_project":
             result = _apply_to_project(approval, payload)
-        elif atype == "git_push":
-            result = _git_push(payload)
-        elif atype == "git_commit":
-            result = _git_commit(payload)
+        elif atype in ("git_commit", "git_push", "open_mr"):
+            if atype != "open_mr" and approval.get("decided_via") == "auto":
+                ok, why = gitops.auto_allowed(atype, payload)   # the repo may have changed since the rule let it through
+                if not ok:
+                    raise RuntimeError(f"no longer allowed without approval: {why}")
+            result = {"git_commit": gitops.commit, "git_push": gitops.push, "open_mr": gitops.open_mr}[atype](payload)
         elif atype == "delete":
             result = _soft_delete(payload)
         elif atype == "spend":
@@ -298,58 +312,6 @@ def _apply_to_project(approval: dict, payload: dict) -> dict:
         shutil.copy2(src, dest)
         done.append({"dest": str(dest), "backup": str(backup) if backup else None})
     return {"done": True, "details": f"已写入 {len(done)} 个文件（原文件已备份）", "files": done}
-
-
-def _gh_exe() -> Path | None:
-    p = load_config().root / "runtime" / "gh" / "bin" / "gh.exe"
-    return p if p.exists() else None
-
-
-def _git(repo_dir: Path, *args: str, timeout: int = 300, extra: list[str] | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *(extra or []), "-C", str(repo_dir), *args], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout, creationflags=0x08000000)
-
-
-_NEVER_COMMIT = re.compile(r"(^|/)(\.env[^/]*|[^/]*\.(pem|key|pfx|p12)|id_rsa[^/]*|secrets?[^/]*|__pycache__|[^/]*\.pyc)(/|$)", re.I)
-
-
-def _git_commit(payload: dict) -> dict:
-    """Commit exactly the listed paths (never `add -A`) in a repo under the user's work roots."""
-    repo_dir = Path(payload["repo"]).resolve()
-    if not policy.writable_destination(repo_dir):
-        raise RuntimeError(f"repo not in allowed roots: {repo_dir}")
-    if not (repo_dir / ".git").exists():
-        raise RuntimeError(f"not a git repository: {repo_dir}")
-    paths = [str(p) for p in (payload.get("paths") or [])]
-    message = (payload.get("message") or "").strip()
-    if not paths or not message:
-        raise RuntimeError("git_commit needs an explicit non-empty 'paths' list and a 'message'")
-    for p in paths:
-        full = (repo_dir / p).resolve()
-        if full != repo_dir and repo_dir not in full.parents:
-            raise RuntimeError(f"path escapes the repository: {p}")
-        if _NEVER_COMMIT.search(p.replace("\\", "/")):
-            raise RuntimeError(f"refusing to commit a credential/cache-like path: {p}")
-    add = _git(repo_dir, "add", "-A", "--", *paths)  # -A so deletions of the listed paths are staged too
-    if add.returncode != 0:
-        return {"done": False, "details": (add.stdout + add.stderr)[-1500:]}
-    commit = _git(repo_dir, "commit", "-m", message, "--", *paths)
-    sha = _git(repo_dir, "rev-parse", "--short", "HEAD").stdout.strip()
-    return {"done": commit.returncode == 0, "details": (commit.stdout + commit.stderr)[-1500:], "commit": sha}
-
-
-def _git_push(payload: dict) -> dict:
-    repo_dir = Path(payload["repo"])
-    if not policy.writable_destination(repo_dir):
-        raise RuntimeError(f"repo not in allowed roots: {repo_dir}")
-    extra: list[str] = []
-    gh = _gh_exe()
-    if gh is not None:  # per-invocation credential helper: no change to the user's global git config
-        extra = ["-c", "credential.https://github.com.helper=", "-c",
-                 f'credential.https://github.com.helper=!"{gh.as_posix()}" auth git-credential']
-    args = ["push"] + ([payload["remote"]] if payload.get("remote") else []) + ([payload["branch"]] if payload.get("branch") else [])
-    p = _git(repo_dir, *args, extra=extra)
-    return {"done": p.returncode == 0, "details": (p.stdout + p.stderr)[-1500:]}
 
 
 def _soft_delete(payload: dict) -> dict:

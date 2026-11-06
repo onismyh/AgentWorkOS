@@ -83,8 +83,17 @@ inbox ─triage─► triaged ─(自动启动 or 用户接受)─► ready ─c
 1. **类别上限**：comms / admin 等最多 L4（必须由人发出）；system / dev / research / doc 可以到 L5。
 2. **工具能力**：需要的执行器、连接器或凭据不可用 → 降级（例如没有 IMAP 就无法读学校邮件）。
 3. **权限**：需要写入的目录不在 `writable_roots` → 最多 L3（只能在工作区里产出）。
-4. **敏感动作**：`SENSITIVE_ACTIONS`（发邮件、发消息、发布、push、删除、花钱、写日历/Notion、回写项目目录）**不论等级都进 Outbox**。
+4. **敏感动作**：`SENSITIVE_ACTIONS`（发邮件、发消息、发布、push、开 MR/PR、删除、花钱、写日历/Notion、回写项目目录）**不论等级都进 Outbox**。唯一的例外是白板上的 git 规则（见下）。
 5. **预算**：当日预算或单任务预算用尽 → 生成 `budget` 审批。
+
+### 白板（共同规则）与 git 规则
+
+白板 = 上下文页最顶部的 `rule` 类条目（`brain/whiteboard.py`，pinned，只有用户能改，Agent 写入会被 `agent_write_fact` 拒绝）。它在每个 Agent 提示词（`context_brief`）的最前面，不受长度截断，同时写进 `profile.md`。内置两条，首次启动时写入一次，之后归用户所有（改了保留，删了不会再补）：
+
+- **Git 交付权限**：Agent 默认可以 commit 并 push 到本地/远端**分支**，不需要批准；不能动默认分支（main/master 与仓库的 `origin/HEAD`），不能 force-push，不能改写历史；**发起或合并 MR/PR 必须先告诉用户**。
+- **交付时清理中间产物**：交付只留最终文件，不留临时脚本、草稿、日志、截图、缓存、重复/备份副本。
+
+落地方式（`hitl/gitops.py`）：Agent 仍然不能直接跑 git 写命令，而是提议 `git_commit` / `git_push` / `open_mr`，由系统执行。`create_from_result` 对 `git_commit` / `git_push` 调用 `gitops.auto_allowed`：目标是非受保护的普通分支（不是 refspec、没有 `+`、远端名合法）就直接放行（审批记录 `decided_via=auto`，仍可在 Outbox 里回看），`git_commit` 带 `branch` 时系统会基于当前 HEAD 新建并切换到该分支再提交；受保护分支或可疑参数照旧进 Outbox（风险标 high）。执行前再核对一次，所以自动放行绝不能解锁默认分支。`open_mr`（`gh pr create`）永远需要用户批准，系统没有“合并”动作。提交还会拒绝凭据、缓存和 `*.bak` / `*.tmp` / `*.orig` 之类的残留文件。清理规则靠提示词（执行 + 质检）和提交过滤把关，不会自动删除工作区文件。`config/policy.toml` 的 `[git]` 可以关掉自动放行（`auto_branch_actions = false`）或增加受保护分支。
 
 ## 5. 执行层（`executors/`）
 

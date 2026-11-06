@@ -36,6 +36,13 @@ class Scheduler:
     def run_forever(self) -> None:
         from .recovery import startup_recovery
         startup_recovery(self.owner)
+        try:  # the whiteboard's built-in rules (git delivery, cleanup) are seeded once; the user owns them afterwards
+            from ..brain import whiteboard
+            from ..brain.context import render_profile
+            if whiteboard.ensure_defaults():
+                render_profile()
+        except Exception:
+            log.exception("whiteboard seeding failed")
         log.info("scheduler started owner=%s tick=%ss max_runs=%s", self.owner, self.tick_s, self.max_runs)
         while not self.stop_event.is_set():
             t0 = time.monotonic()

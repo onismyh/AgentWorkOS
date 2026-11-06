@@ -9,14 +9,14 @@ from .. import repo
 from ..config import load_config
 from ..db import q, utcnow
 from ..timeutil import local_now
-from . import prompts
+from . import prompts, whiteboard
 from .schemas import CONTEXT_SCHEMA
 
 log = logging.getLogger("awos.context")
 
-KIND_TITLES = {"role": "身份与职责", "goal": "长期目标", "project": "正在推进的项目", "deadline": "截止日期",
+KIND_TITLES = {"rule": "白板·共同规则", "role": "身份与职责", "goal": "长期目标", "project": "正在推进的项目", "deadline": "截止日期",
                "interest": "技术兴趣", "habit": "日常习惯", "preference": "偏好", "person": "协作者", "note": "备注"}
-KIND_ORDER = ["role", "goal", "project", "deadline", "preference", "habit", "interest", "person", "note"]
+KIND_ORDER = ["role", "goal", "project", "deadline", "preference", "habit", "interest", "person", "note"]   # `rule` is rendered first, separately
 
 
 def _latest_progress(facts: list[dict]) -> dict[str, str]:
@@ -62,7 +62,9 @@ def context_brief(max_chars: int = 3500) -> str:
     out = "\n".join(lines)
     if len(out) > max_chars:
         out = out[: max_chars - 20] + "\n…（已截断）"
-    return out if facts or focus else out + "\n（个人上下文尚在建立中）"
+    out = out if facts or focus else out + "\n（个人上下文尚在建立中）"
+    rules = whiteboard.rules_md()
+    return f"{rules}\n\n{out}" if rules else out   # the whiteboard is never truncated and always comes first
 
 
 def render_profile() -> str:
@@ -70,6 +72,9 @@ def render_profile() -> str:
     focus = repo.kv_get("context.focus") or ""
     md = [f"# 个人工作上下文（自动维护，更新于 {local_now().strftime('%Y-%m-%d %H:%M')}）", "",
           "> 在 Dashboard「上下文」页面可以编辑；用户编辑过的条目会被标记为 pinned，Agent 不会覆盖。", ""]
+    wb = whiteboard.rules()
+    if wb:
+        md += [f"## {KIND_TITLES['rule']}", *(f"- **{f['key']}**：{f['value']}" for f in wb), ""]
     if focus:
         md += ["## 近期工作重心", focus, ""]
     by_kind: dict[str, list[dict]] = {}
@@ -167,6 +172,8 @@ def agent_write_fact(kind: str, key: str, value: str, *, source: str, confidence
     project (kept as one rolling `进展·<project>` note), it cannot create or re-summarise projects; the daily context
     agent may maintain project summaries but a dated / kebab-case key is still just a progress note."""
     from . import projects
+    if kind == whiteboard.RULE_KIND:
+        return None   # the whiteboard belongs to the user: agents read it, they never write it
     if kind == "project":
         existing = projects.match_project(key)
         if existing and may_define_projects:

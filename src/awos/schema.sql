@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     task_id         TEXT,
     run_id          TEXT,
     kind            TEXT NOT NULL,            -- action | decision | review | permission | budget
-    action_type     TEXT,                     -- send_email | post_message | publish | git_push | apply_to_project | calendar_write | notion_write | delete | spend | other
+    action_type     TEXT,                     -- send_email | post_message | publish | git_push | git_commit | open_mr | apply_to_project | calendar_write | notion_write | delete | spend | other
     title           TEXT NOT NULL,
     context_md      TEXT,                     -- background the human needs
     recommendation  TEXT,                     -- AI recommendation (option key + why)

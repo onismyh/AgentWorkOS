@@ -23,8 +23,14 @@ deny_globs = ["**/.ssh/**", "**/.codex/auth.json", "**/.claude/.credentials.json
 
 [actions]
 # Action types that always need human approval regardless of level (mirrors models.SENSITIVE_ACTIONS).
-always_approve = ["send_email", "post_message", "publish", "git_push", "git_commit", "calendar_write", "notion_write", "delete",
+always_approve = ["send_email", "post_message", "publish", "git_push", "git_commit", "open_mr", "calendar_write", "notion_write", "delete",
                   "spend", "apply_to_project", "submit_form", "other"]
+
+[git]
+# Whiteboard rule: an agent's git_commit / git_push of a NON-protected branch runs without asking (it is still logged in the
+# Outbox). Protected branches, MR/PR creation (open_mr) and anything else still wait for the human. Set false to ask for every one.
+auto_branch_actions = true
+protected_branches = ["main", "master"]   # the repo's own default branch (origin/HEAD) is protected as well
 # Approvals expire after this many hours (then the task is handed back to the human).
 expiry_hours = { low = 72, medium = 72, high = 48 }
 

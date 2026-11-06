@@ -60,7 +60,7 @@ RUN_STATUS_LABELS = {"queued": "排队", "running": "运行中", "succeeded": "�
 APPROVAL_STATUS_LABELS = {"pending": "待决策", "approved": "已批准", "rejected": "已拒绝", "expired": "已过期",
                           "cancelled": "已取消", "executing": "执行中", "executed": "已执行", "failed": "执行失败"}
 APPROVAL_KIND_LABELS = {"action": "动作", "decision": "决策", "review": "评审", "permission": "权限", "budget": "预算"}
-FACT_KINDS = {"role": "角色", "project": "项目", "goal": "目标", "interest": "兴趣", "habit": "习惯",
+FACT_KINDS = {"rule": "白板规则", "role": "角色", "project": "项目", "goal": "目标", "interest": "兴趣", "habit": "习惯",
               "preference": "偏好", "person": "人物", "deadline": "截止日期", "note": "备注"}
 TASK_ACTIONS = ("accept", "retry", "rework", "complete", "cancel", "dismiss", "snooze")
 
