@@ -5,19 +5,20 @@ import { ACTS, CHANGES, INPUTS } from '../core/acts.js';
 import { S, cacheTask, cacheApproval, CACHE } from '../core/state.js';
 import { isUnread, markRead, markUnread, stampOf, pref, touchTopic } from '../core/store.js';
 import { setParams, parseHash, go } from '../core/router.js';
-import { when, cut, countdown, parseTs } from '../core/format.js';
+import { when } from '../core/format.js';
 import { icon } from '../ui/icons.js';
-import { btn, iconBtn, badge, kwChips, kwChip, levelBadge, prioIcon, riskBadge, empty, kbd, skeletonList, errorState, tipAttr, seg, projectChip } from '../ui/components.js';
+import { btn, iconBtn, empty, kbd, skeletonList, errorState, seg, projectChip } from '../ui/components.js';
 import { taskReader, approvalReader, mountReader, taskActionList } from '../ui/reader.js';
 import { toast } from '../ui/overlay.js';
 import { snapshotUI, restoreUI } from '../core/ui-state.js';
-import { META, digestOf, sourceIcon, recommendedKey, isRejectish, effLevel } from '../domain/vocab.js';
+import { META, recommendedKey, isRejectish } from '../domain/vocab.js';
 import { taskAction, taskActionUndoable, decideApproval } from '../domain/actions.js';
 import { skel } from '../ui/components.js';
-import { topicReader, mountTopicReader, countChips } from '../ui/topic-reader.js';
+import { topicReader, mountTopicReader } from '../ui/topic-reader.js';
 import { mountRecap, fetchTopic } from '../ui/recap.js';
 import { projectReader } from '../ui/project-reader.js';
-import { SECTION_VIEW, ageWord, groupByTopic, isTopicKey, oldTone, topicFromSel, topicSel } from '../domain/topics.js';
+import { ageWord, groupByTopic, isTopicKey, oldTone, topicFromSel, topicSel } from '../domain/topics.js';
+import { ASK, askVerb, needsText, oneLineState, plainHeadline, rowNote, urgencyOf } from '../domain/readable.js';
 import { NO_PROJECT, PROJ, groupByProject, isProjectKey, loadProject, noteTopicProjects, projectFromSel, projectOfTopic, projectSel, projectSlot } from '../domain/projects.js';
 
 const isHeadKey = (k) => isTopicKey(k) || isProjectKey(k);   // a group header (topic / project), as opposed to an item row
@@ -25,19 +26,21 @@ const pgKey = (k) => `pj:${k}`;                              // collapse-state k
 
 const SECTION_ICON = { decision: 'scale', approval: 'shield-alert', review: 'circle-dot', handoff: 'hand', suggested: 'sparkles', failed: 'circle-x', pending: 'shield-alert', history: 'check-check' };
 
-export function rowHTML(it, selKey, { inTopic = false, showTopic = false, project = null } = {}) {
+/** `bare` leaves the verb out (the 按类型 group header above already says it). One list row = one plain-language line ("要你决定：…") + one muted line (the AI's recommendation or the summary) + when / how urgent. */
+export function rowHTML(it, selKey, { inTopic = false, showTopic = false, project = null, bare = false } = {}) {
   const unread = isUnread(it.key, it.stamp);
-  const cd = it.expires_at && it.kind === 'approval' && it.status === 'pending' ? countdown(it.expires_at) : null;
   const sel = it.key === selKey;
-  const sv = inTopic ? SECTION_VIEW[it.section] : null;
+  const urg = urgencyOf(it);
+  const note = rowNote(it);
+  const where = showTopic ? (project?.name || it.topic_title || '') : '';
+  const tone = (ASK[it.section] || {}).tone || 'muted';
   return h`<a class="srow${sel ? ' sel' : ''}${unread ? ' unread' : ''}${inTopic ? ' in-topic' : ''}" role="option" id="row-${it.dom}" aria-selected="${sel}" data-key="${it.key}" data-act="split-select" href="#/${S.view}?sel=${enc(it.key)}">
     <span class="sr-dot" ${unread ? raw('data-tip="未读"') : ''}></span>
-    <span class="sr-ic tone-${it.tone || 'muted'}">${icon(it.kind === 'approval' ? (it.action_type === 'send_email' ? 'mail' : 'shield-alert') : sourceIcon(it.source), { size: 15 })}</span>
     <span class="sr-main">
-      <span class="sr-l1"><span class="sr-title">${it.headline}</span><span class="sr-r">${it.kind === 'approval' ? riskBadge(it.risk) : it.level ? levelBadge(it) : ''}<span class="sr-w">${when(it.ts, { short: true })}</span></span></span>
-      ${it.gist ? h`<span class="sr-gist">${it.gist}</span>` : ''}
-      <span class="sr-l3">${sv ? h`<span class="sr-sec tone-${sv.tone}">${sv.label}</span>` : ''}${showTopic && it.topic_title ? h`<span class="sr-tp" data-tip="话题：${it.topic_title}">${icon('layers', { size: 11 })}<span>${it.topic_title}</span></span>` : ''}${showTopic && project ? projectChip(project, { cls: 'in-row' }) : ''}${kwChips(it.keywords, { max: sv || showTopic ? (project ? 1 : 2) : 3 })}<span class="grow"></span>${it.priority != null ? prioIcon(it.priority) : ''}${cd ? h`<span class="sr-cd cd-${cd.state}">${icon('hourglass', { size: 12 })}${cd.text}</span>` : ''}</span>
-    </span></a>`;
+      <span class="sr-title">${bare ? '' : h`<b class="sr-ask tone-${tone}">${askVerb(it, META.apvLabel)}</b>`}${plainHeadline(it.section, it.headline)}</span>
+      ${note || where ? h`<span class="sr-note">${note}${where ? h`<span class="sr-where">${note ? ' · ' : ''}${where}</span>` : ''}</span>` : ''}
+    </span>
+    <span class="sr-side"><span class="sr-w">${when(it.ts, { short: true })}</span>${urg ? h`<span class="sr-flag tone-${urg.tone}">${urg.text}</span>` : ''}</span></a>`;
 }
 
 export class Split {
@@ -149,29 +152,31 @@ export class Split {
         ${btn('全部已读', { act: 'split-readall', size: 'sm', variant: 'ghost', icon: 'check-check' })}</div>
       <div class="sp-chips" role="group" aria-label="分区筛选"><button type="button" class="chip-f${!sec ? ' on' : ''}" data-act="split-sec" data-sec="">全部 <b>${this.items.length}</b></button>${this.cfg.sections.filter((s) => counts[s.key]).map((s) => h`<button type="button" class="chip-f${sec === s.key ? ' on' : ''}" data-act="split-sec" data-sec="${s.key}">${s.title} <b>${counts[s.key]}</b></button>`)}</div>
       <div class="sp-row2">${pf ? h`<button type="button" class="chip-f on chip-pj" data-act="split-project-clear" data-tip="清除项目筛选">${icon('folder', { size: 12 })}<span class="chip-pj-n">${this.projectName(pf)}</span>${icon('x', { size: 12 })}</button>` : ''}${kw ? h`<button type="button" class="chip-f on" data-act="split-kw-clear" data-tip="清除关键词筛选">${icon('hash', { size: 12 })}${kw}${icon('x', { size: 12 })}</button>` : ''}
-        ${topKw.length ? h`<select class="select select-sm" data-change="split-kwsel" aria-label="按关键词筛选"><option value="">全部关键词</option>${topKw.map(([k, n]) => h`<option value="${k}"${k === kw ? raw(' selected') : ''}>${k}${n ? ` (${n})` : ''}</option>`)}</select>` : ''}
-        ${levels.length > 1 ? h`<select class="select select-sm" data-change="split-level" aria-label="按等级筛选"><option value="">全部等级</option>${levels.map((l) => h`<option value="${l}"${this.f.level === String(l) ? raw(' selected') : ''}>L${l}</option>`)}</select>` : ''}
-        <label class="check small"><input type="checkbox" data-change="split-unread"${this.f.unread ? raw(' checked') : ''}><span>仅未读</span></label></div>`;
+        <label class="check small"><input type="checkbox" data-change="split-unread"${this.f.unread ? raw(' checked') : ''}><span>仅看未读</span></label><span class="grow"></span>
+        ${topKw.length || levels.length > 1 ? h`<details class="sp-more"${kw || this.f.level ? raw(' open') : ''}><summary>${icon('filter', { size: 13 })}<span>更多筛选</span></summary><div class="sp-more-b">
+          ${topKw.length ? h`<select class="select select-sm" data-change="split-kwsel" aria-label="按关键词筛选"><option value="">全部关键词</option>${topKw.map(([k, n]) => h`<option value="${k}"${k === kw ? raw(' selected') : ''}>${k}${n ? ` (${n})` : ''}</option>`)}</select>` : ''}
+          ${levels.length > 1 ? h`<select class="select select-sm" data-change="split-level" aria-label="按自主等级筛选"><option value="">全部自主等级</option>${levels.map((l) => h`<option value="${l}"${this.f.level === String(l) ? raw(' selected') : ''}>L${l}</option>`)}</select>` : ''}</div></details>` : ''}</div>`;
   }
-  /** A topic group. `as` = the project it stands for (按项目 with a single topic: the header is the project, the topic is its subtitle). */
+  /** A topic group. `as` = the project it stands for (按项目 with a single topic: the header IS the project and carries its one-line state);
+      `sub` = a quiet sub-header of a topic inside a multi-topic project. */
   topicGroupHTML(g, { as = null, sub = false, showProject = false } = {}) {
     const key = topicSel(g.key); const open = !this.isClosed(g.key); const sel = this.sel === key;
     const unread = g.items.some((i) => isUnread(i.key, i.stamp));
     const dom = this.domOf(key);
-    const tone = oldTone(g.oldest_ts);
     const label = as ? as.name : g.title;
+    const state = sub ? '' : oneLineState(g.state_now || as?.summary || '');
+    const late = !sub && oldTone(g.oldest_ts) !== 'muted' ? { tone: oldTone(g.oldest_ts), text: `已等 ${ageWord(g.oldest_ts)}` } : null;
     return h`<div class="tgroup${open ? '' : ' closed'}${sub ? ' sub' : ''}${as ? ` by-project pj-c${projectSlot(as.key)}` : ''}" role="group" aria-label="${label}" data-topic="${g.key}">
       <div class="tg-row${sel ? ' sel' : ''}${unread ? ' unread' : ''}">
         <button type="button" class="tg-tog" tabindex="-1" data-act="topic-toggle" data-topic="${g.key}" aria-expanded="${open}" aria-label="${open ? '折叠' : '展开'}${as ? '项目' : '话题'}：${label}">${icon('chevron-down', { size: 14 })}</button>
         <a class="tg-h" role="option" id="row-${dom}" aria-selected="${sel}" data-key="${key}" data-act="split-select" href="#/${S.view}?sel=${enc(key)}">
-          <span class="tg-l1"><span class="tg-dot${unread ? ' on' : ''}" ${unread ? raw('data-tip="有未读事项"') : ''}></span>${as ? h`<span class="tg-pic">${icon('folder', { size: 14 })}</span>` : ''}<span class="tg-title">${label}</span>${g.oldest_ts ? h`<span class="tg-age tone-${tone}">${icon('clock', { size: 11 })}最早 ${ageWord(g.oldest_ts)}前</span>` : ''}</span>
-          <span class="tg-l2">${countChips(g.counts)}${showProject ? projectChip(g.project, { empty: true, cls: 'tg-pj' }) : ''}${g.has_brief ? '' : h`<span class="tg-nb" data-tip="还没有 AI 生成的提要">${icon('sparkles', { size: 11 })}无提要</span>`}</span>
-          ${as && g.title !== as.name ? h`<span class="tg-tp" data-tip="话题：${g.title}">${icon('layers', { size: 11 })}<span>${g.title}</span></span>` : ''}
-          ${g.state_now ? h`<span class="tg-state">${g.state_now}</span>` : ''}
+          <span class="tg-l1"><span class="tg-dot${unread ? ' on' : ''}" ${unread ? raw('data-tip="有未读事项"') : ''}></span>${as ? h`<span class="tg-pic">${icon('folder', { size: 14 })}</span>` : ''}<span class="tg-title">${label}</span><span class="tg-need">${sub ? `${g.counts.total} 项` : needsText(g.counts)}</span>${late ? h`<span class="tg-age tone-${late.tone}">${late.text}</span>` : ''}</span>
+          ${state ? h`<span class="tg-state">${state}</span>` : ''}
+          ${showProject && g.project ? h`<span class="tg-l2">${projectChip(g.project, { empty: true, cls: 'tg-pj' })}</span>` : ''}
         </a></div>
       ${open ? g.items.map((it) => rowHTML(it, this.sel, { inTopic: true })) : ''}</div>`;
   }
-  /** 按项目: a project (header = the project; its topics are sub-headers when there are several) or the last group 未关联项目. */
+  /** 按项目: a project (header = the project; its topics are quiet sub-headers when there are several) or the last group 未关联项目. */
   projectGroupHTML(pg) {
     if (pg.key !== NO_PROJECT && pg.topics.length === 1) return this.topicGroupHTML(pg.topics[0], { as: pg.project });
     const ck = pgKey(pg.key); const open = !this.isClosed(ck);
@@ -179,17 +184,18 @@ export class Split {
     const subs = open ? h`<div class="pg-topics">${pg.topics.map((t) => this.topicGroupHTML(t, { sub: true }))}</div>` : '';
     if (pg.key === NO_PROJECT) {
       return h`<div class="tgroup pgroup pg-none${open ? '' : ' closed'}" role="group" aria-label="未关联项目" data-project="${NO_PROJECT}">
-        <div class="tg-row pg-row">${tog}<div class="tg-h pg-h"><span class="tg-l1"><span class="tg-pic">${icon('circle-dashed', { size: 14 })}</span><span class="tg-title">未关联项目</span><span class="pg-n">${pg.topics.length} 个话题</span></span>
-          <span class="tg-state">选中话题后按 P，把它们归到项目里</span></div></div>${subs}</div>`;
+        <div class="tg-row pg-row">${tog}<div class="tg-h pg-h"><span class="tg-l1"><span class="tg-pic">${icon('circle-dashed', { size: 14 })}</span><span class="tg-title">未关联项目</span><span class="tg-need">${pg.items.length} 项</span></span>
+          <span class="tg-state">还没归到项目里的话题；选中话题后按 P 归类</span></div></div>${subs}</div>`;
     }
     const key = projectSel(pg.key); const sel = this.sel === key;
     const unread = pg.items.some((i) => isUnread(i.key, i.stamp));
+    const state = oneLineState(pg.state_now || pg.project?.summary || '');
+    const late = oldTone(pg.oldest_ts) !== 'muted' ? { tone: oldTone(pg.oldest_ts), text: `已等 ${ageWord(pg.oldest_ts)}` } : null;
     return h`<div class="tgroup pgroup pj-c${projectSlot(pg.key)}${open ? '' : ' closed'}" role="group" aria-label="${pg.name}" data-project="${pg.key}">
       <div class="tg-row pg-row${sel ? ' sel' : ''}${unread ? ' unread' : ''}">${tog}
         <a class="tg-h" role="option" id="row-${this.domOf(key)}" aria-selected="${sel}" data-key="${key}" data-act="split-select" href="#/${S.view}?sel=${enc(key)}">
-          <span class="tg-l1"><span class="tg-dot${unread ? ' on' : ''}" ${unread ? raw('data-tip="有未读事项"') : ''}></span><span class="tg-pic">${icon('folder', { size: 14 })}</span><span class="tg-title">${pg.name}</span>${pg.oldest_ts ? h`<span class="tg-age tone-${oldTone(pg.oldest_ts)}">${icon('clock', { size: 11 })}最早 ${ageWord(pg.oldest_ts)}前</span>` : ''}</span>
-          <span class="tg-l2">${countChips(pg.counts)}<span class="pg-n">${pg.topics.length} 个话题</span></span>
-          ${pg.state_now ? h`<span class="tg-state">${pg.state_now}</span>` : ''}
+          <span class="tg-l1"><span class="tg-dot${unread ? ' on' : ''}" ${unread ? raw('data-tip="有未读事项"') : ''}></span><span class="tg-pic">${icon('folder', { size: 14 })}</span><span class="tg-title">${pg.name}</span><span class="tg-need">${needsText(pg.counts)}</span>${late ? h`<span class="tg-age tone-${late.tone}">${late.text}</span>` : ''}</span>
+          ${state ? h`<span class="tg-state">${state}</span>` : ''}
         </a></div>${subs}</div>`;
   }
   listBodyHTML() {
@@ -207,7 +213,7 @@ export class Split {
     if (mode === 'topic') return h`${groupByTopic(vis, this.topics).map((g) => this.topicGroupHTML(g, { showProject: this.hasProjects() }))}`;
     return h`${this.grouped(vis).map(([key, rows]) => {
       const s = this.cfg.sections.find((x) => x.key === key) || { title: key };
-      return h`<div class="sgroup" role="group" aria-label="${s.title}"><div class="sgroup-h"><span class="sg-i tone-${s.tone || 'muted'}">${icon(SECTION_ICON[key] || 'circle', { size: 13 })}</span><b>${s.title}</b><span class="sg-n">${rows.length}</span>${s.hint ? h`<span class="sg-hint">${s.hint}</span>` : ''}</div>${rows.map((it) => rowHTML(it, this.sel, { showTopic: this.hasTopics(), project: this.projectOf(it.topic_key) }))}</div>`;
+      return h`<div class="sgroup" role="group" aria-label="${s.title}"><div class="sgroup-h"><span class="sg-i tone-${s.tone || 'muted'}">${icon(SECTION_ICON[key] || 'circle', { size: 13 })}</span><b>${s.title}</b><span class="sg-n">${rows.length}</span>${s.hint ? h`<span class="sg-hint">${s.hint}</span>` : ''}</div>${rows.map((it) => rowHTML(it, this.sel, { showTopic: this.hasTopics(), project: this.projectOf(it.topic_key), bare: it.section !== 'history' }))}</div>`;
     })}`;
   }
   render() {

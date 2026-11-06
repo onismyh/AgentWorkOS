@@ -319,7 +319,7 @@ const rd = String(TR.topicReader({{ key: 'k', title: evil, brief: {{ state_now: 
   history: [{{ ts: '2026-11-01T00:00:00Z', kind: 'found', text: evil }}], items: [{{ kind: 'approval', id: 'apv_1', section: 'decision', title: evil, headline: evil, gist: evil, ts: '2026-11-01T00:00:00Z', risk: 'low' }},
   {{ kind: 'task', id: 'tsk_1', section: 'review', title: 'x', headline: 'x', status: 'review', ts: '2026-11-02T00:00:00Z' }}], counts: {{}}, age_days: 4 }}));
 must('topic reader escapes', !rd.includes('<img') && !rd.includes('<script') && rd.includes('&lt;script'));
-must('topic reader structure', rd.includes('data-reader="topic"') && rd.includes('现状') && rd.includes('前情提要') && rd.includes('现在需要你') && rd.includes('data-act="topic-dismiss"') && rd.includes('data-act="topic-refresh"'));
+must('topic reader structure', rd.includes('data-reader="topic"') && rd.includes('现在的状况') && rd.includes('前情提要') && rd.includes('现在需要你') && rd.includes('data-act="topic-dismiss"') && rd.includes('data-act="topic-refresh"'));
 must('topic reader reuses the decision buttons', rd.includes('data-act="decide"') && rd.includes('data-option="yes"') && rd.includes('data-act="task-action"') && rd.includes('可能已过期'));
 must('topic reader empty items', String(TR.topicReader({{ key: 'k', title: 'T', brief: null, history: [], items: [], counts: {{}} }})).includes('这个话题没有历史记录'));
 
@@ -336,16 +336,16 @@ const ctl = new split.Split({{ id: 'unit', title: '收件箱', icon: 'inbox', se
 const mk = (key, topic, section, ts) => ({{ key, dom: key, kind: 'task', id: key, section, headline: key, gist: '', keywords: [], title: key, topic_key: topic, topic_title: topic, ts, stamp: ts, level: 1 }});
 ctl.adopt({{ items: [mk('task:a1', 'A', 'suggested', '2026-11-01T00:00:00Z'), mk('task:b1', 'B', 'decision', '2026-11-03T00:00:00Z'), mk('task:b2', 'B', 'review', '2026-11-03T01:00:00Z'), mk('task:a2', 'A', 'failed', '2026-11-02T00:00:00Z')], extra: null, topics: [] }});
 must('mode defaults to topic', ctl.mode() === 'topic' && ctl.hasTopics());
-must('keys: header then items, urgent topic first', ctl.visibleKeys().join() === 'topic:B,task:b1,task:b2,topic:A,task:a1,task:a2');
+must('keys: header then items (what needs you most first: a failure before a mere suggestion), urgent topic first', ctl.visibleKeys().join() === 'topic:B,task:b1,task:b2,topic:A,task:a2,task:a1');
 ctl.collapsed = {{ B: true }};
-must('collapsed topic keeps only its header', ctl.visibleKeys().join() === 'topic:B,topic:A,task:a1,task:a2');
+must('collapsed topic keeps only its header', ctl.visibleKeys().join() === 'topic:B,topic:A,task:a2,task:a1');
 ctl.collapsed = {{}};
 must('find topic by selection key', ctl.findTopic('topic:A').items.length === 2 && ctl.exists('topic:B') && ctl.exists('task:a1') && !ctl.exists('topic:zzz'));
-must('after clearing the last item of a topic, the next item is opened first', ctl.neighbourOf('task:b2') === 'task:a1' && ctl.neighbourOf('task:a2') === 'task:a1');
+must('after clearing the last item of a topic, the next item is opened first', ctl.neighbourOf('task:b2') === 'task:a2' && ctl.neighbourOf('task:a2') === 'task:a1');
 const prev = ctl.visibleKeys();
 ctl.adopt({{ items: ctl.items.filter((i) => i.topic_key !== 'B'), extra: null, topics: [] }});
 must('successor of a vanished topic is the next topic', ctl.successor(prev, 'topic:B') === 'topic:A');
-must('successor of a vanished item stays an item', ctl.successor(prev, 'task:b2') === 'task:a1');
+must('successor of a vanished item stays an item', ctl.successor(prev, 'task:b2') === 'task:a2');
 if (bad.length) {{ console.log('FAILED: ' + bad.join(', ')); process.exit(1); }}
 console.log('ok');
 """
@@ -584,7 +584,7 @@ must('AI badge', String(PC.projectCard({ key: 'P1', name: 'n', summary: '', link
 const none = String(PC.projectCard(null, { key: 't', title: 'T' }));
 must('empty card', none.includes('这个话题还没有关联项目') && none.includes('data-act="topic-project"') && none.includes('关联项目…') && !none.includes('data-pj-fill'));
 const rd = String(TR.topicReader({ key: 'k', title: 'T', project: { key: 'P', name: evil, summary: evil, link_source: 'llm' }, brief: null, history: [], items: [], counts: {} }));
-must('topic reader: project card above 现状, escaped', clean(rd) && rd.indexOf('data-pj-card') > 0 && rd.indexOf('data-pj-card') < rd.indexOf('tp-now'));
+must('topic reader: 现在需要你 first, then 现在的状况, the project card last, escaped', clean(rd) && rd.indexOf('tp-needs') > 0 && rd.indexOf('tp-needs') < rd.indexOf('tp-now') && rd.indexOf('tp-now') < rd.indexOf('data-pj-card'));
 must('older server (no project field): no card', !String(TR.topicReader({ key: 'k', title: 'T', brief: null, history: [], items: [], counts: {} })).includes('data-pj-card'));
 must('project null: the empty card', String(TR.topicReader({ key: 'k', title: 'T', project: null, brief: null, history: [], items: [], counts: {} })).includes('pj-card-none'));
 const grp = { key: 'P1', project: { key: 'P1', name: evil, summary: evil }, name: evil, topics: [{ key: 'tA', title: evil, counts: { decision: 1, total: 1 }, state_now: evil, oldest_ts: '2026-11-01T00:00:00Z' }], counts: { decision: 1, total: 1 }, oldest_ts: '2026-11-01T00:00:00Z' };
@@ -619,7 +619,7 @@ ctl.collapsed = { 'pj:P1': true, tA: true };
 must('reveal opens the groups around a selection', ctl.reveal('task:a1') === true && !ctl.collapsed['pj:P1'] && !ctl.collapsed.tA);
 must('successor of a vanished project header is the next header', (() => { const prev = ctl.visibleKeys(); ctl.adopt({ items: items.filter((i) => i.topic_key !== 'tA' && i.topic_key !== 'tB'), extra: null, topics }); const nxt = ctl.successor(prev, 'project:P1'); ctl.adopt({ items, extra: null, topics }); return nxt === 'topic:tC'; })());
 const html = String(ctl.listBodyHTML());
-must('list markup: project groups, sub-topics, 未关联项目', html.includes('data-project="P1"') && html.includes('2 个话题') && html.includes('data-project="__none__"') && html.includes('未关联项目') && html.includes('by-project'));
+must('list markup: project groups, sub-topics, 未关联项目', html.includes('data-project="P1"') && html.includes('tgroup sub') && html.includes('data-project="__none__"') && html.includes('未关联项目') && html.includes('by-project'));
 const noProj = new split.Split({ id: 'unit-pj2', title: '收件箱', icon: 'inbox', sections: [], emptyAll: () => '' });
 noProj.adopt({ items, extra: null, topics: topics.map(({ project, ...t }) => t) });
 must('older server (no project field): falls back to 按话题', noProj.mode() === 'topic' && !noProj.hasProjects());
@@ -635,9 +635,9 @@ store2.pref.set('unit-pj.group', 'topic');
 must('按话题 headers carry the project chip', String(ctl.listBodyHTML()).includes('tg-pj') && ctl.mode() === 'topic');
 store2.pref.set('unit-pj.group', 'type');
 const rows = String(ctl.listBodyHTML());
-must('按类型 rows carry the project chip', ctl.mode() === 'type' && rows.includes('in-row'));
+must('按类型 rows say which project they belong to (plain text, no chip)', ctl.mode() === 'type' && rows.includes('sr-where') && !rows.includes('in-row'));
 const rowEvil = String(split.rowHTML(mk('task:e', 'tA', 'review', '2026-11-01T00:00:00Z'), null, { showTopic: true, project: { key: 'P', name: evil } }));
-must('row chip escapes', clean(rowEvil) && rowEvil.includes('pj-chip'));
+must('row project name escapes', clean(rowEvil) && rowEvil.includes('sr-where'));
 
 // ---- 上下文: projects as cards, working notes muted under a project or in a group of their own
 const fact = (id, kind, key, value, extra = {}) => ({ id, kind, key, value, source: 'ctx', confidence: 0.6, status: 'active', pinned: 1, updated_at: '2026-11-01T00:00:00Z', ...extra });

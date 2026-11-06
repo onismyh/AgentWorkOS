@@ -5,7 +5,8 @@ import { api } from '../core/api.js';
 import { S, CACHE, cacheApproval } from '../core/state.js';
 import { empty, skeletonList, tabs } from '../ui/components.js';
 import { Split, setActiveSplit, splitKeys } from './split.js';
-import { digestOf, META } from '../domain/vocab.js';
+import { digestOf, META, recommendedKey } from '../domain/vocab.js';
+import { recLabel } from '../domain/readable.js';
 import { parseTs } from '../core/format.js';
 
 const DECIDED = 'approved,rejected,expired,cancelled,executing,executed,failed';
@@ -25,6 +26,7 @@ function toItems(list, tmap = null) {
       headline: dg.headline, gist: dg.gist || (decided ? `${META.apvLabel[a.status] || a.status}${a.decision ? ` · ${a.decision}` : ''}` : ''), keywords: dg.keywords, auto: dg.auto,
       title: a.title, level: a.task_level, risk: a.risk, action_type: a.action_type, status: a.status, ts: decided ? (a.decided_at || a.created_at) : a.created_at,
       stamp: `${a.status}|${a.decided_at || a.created_at}`, expires_at: a.expires_at, tone: a.risk === 'high' ? 'crit' : decided ? 'muted' : 'warn',
+      rec_label: decided ? '' : recLabel(a, recommendedKey),
     };
   });
 }

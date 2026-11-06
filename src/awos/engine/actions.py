@@ -19,7 +19,8 @@ def add_manual_task(title: str, description: str | None = None, *, level: int | 
     tid = repo.create_task(title, description=description, kind=kind, category=category or "other", priority=priority,
                            level=level or 1, status=status, executor=executor, project=project, due_at=due_at,
                            source="manual", actor=actor,
-                           meta={"manual": True, "level_locked": level is not None, "category_locked": category is not None})
+                           meta={"manual": True, "level_locked": level is not None, "category_locked": category is not None,
+                                 **({"executor_pinned": True} if executor else {})})
     return tid
 
 
@@ -125,6 +126,8 @@ def set_task_fields(task_id: str, actor: str = "user", **fields: Any) -> None:
         repo.merge_task_meta(task_id, level_locked=True)
     if "priority" in clean:
         clean["priority"] = max(0, min(3, int(clean["priority"])))
+    if "executor" in clean:   # a choice by the user (pins it) or "auto" (empty: back to the router's decision)
+        repo.merge_task_meta(task_id, executor_pinned=True if clean["executor"] else None)
     if clean:
         repo.update_task(task_id, actor=actor, **clean)
 

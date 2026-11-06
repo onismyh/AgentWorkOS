@@ -15,6 +15,8 @@ import { recapCard, mountRecap } from './recap.js';
 import { META, TERMINAL, digestOf, catLabel, levelName, effLevel, execLabel, purposeLabel, sourceIcon, sourceLabel, recommendedKey,
   isRejectish } from '../domain/vocab.js';
 import { taskAction, decideApproval, patchTask, editTaskDialog, copyText, options, LEVEL_OPTS, PRIO_OPTS } from '../domain/actions.js';
+import { ASK, plainHeadline, urgencyOf } from '../domain/readable.js';
+import { routingSection, executorOf, pinnedExec } from './routing.js';
 
 /* ------------------------------------------------------------------ sections */
 const sec = (title, body, { icon: ic, count, open = true, id, cls = '' } = {}) =>
@@ -197,7 +199,7 @@ function optionDetails(a) {
   const opts = (a.options || []).filter((o) => o && o.key && o.description);
   if (!opts.length) return '';
   const recKey = recommendedKey(a);
-  return sec('各选项的含义', h`<ul class="optd">${opts.map((o) => h`<li><b>${o.label || o.key}</b>${o.key === recKey ? h`<span class="optd-rec">${icon('sparkles', { size: 11 })}AI 推荐</span>` : ''}<p>${o.description}</p></li>`)}</ul>`, { icon: 'file-text' });
+  return sec('各选项的含义', h`<ul class="optd">${opts.map((o) => h`<li><b>${o.label || o.key}</b>${o.key === recKey ? h`<span class="optd-rec">${icon('sparkles', { size: 11 })}AI 推荐</span>` : ''}<p>${o.description}</p></li>`)}</ul>`, { icon: 'file-text', open: false });
 }
 export function decisionBlock(a, { compact = false, terse = false } = {}) {
   if (a.status !== 'pending') {
@@ -228,20 +230,42 @@ ACTS.decide = async (el) => {
   try { await decideApproval(a, el.dataset.option, note, el.dataset.label); } finally { btns.forEach((b) => { b.disabled = false; }); }
 };
 
+/* ------------------------------------------------------------------ lead block: what is being asked of you */
+const SECTION_OF_STATUS = { review: 'review', waiting_user: 'handoff', failed: 'failed', inbox: 'suggested', triaged: 'suggested', snoozed: 'suggested' };
+/** The kicker above the title: "要你决定" / "待你验收" ... plus the ONE urgency marker, when there is one. */
+function askKicker(section, urg) {
+  const a = ASK[section];
+  if (!a) return '';
+  return h`<div class="rd-ask tone-${a.tone}">${icon(a.icon, { size: 15 })}<b>${a.verb}</b>${urg ? h`<span class="rd-flag tone-${urg.tone}">${urg.text}</span>` : ''}</div>`;
+}
+/** "你需要做什么": the first thing the reader says. `body` = extra blocks (the AI's recommendation, option meanings). */
+const todoBlock = (section, body = '') => {
+  const a = ASK[section];
+  return a ? h`<section class="rd-todo tone-${a.tone}" aria-label="你需要做什么"><h2>你需要做什么</h2><p class="rd-todo-p">${a.todo}</p>${body}</section>` : '';
+};
+/** Everything technical about an item, one tidy list, folded away by default. */
+const detailList = (rows) => kvList(rows.filter(([, v]) => v != null && v !== '' && v !== false), { cls: 'rd-details' });
+
 /* ------------------------------------------------------------------ task reader */
 function metaRow(t) {
   const due = t.due_at ? parseTs(t.due_at) : null;
   const overdue = due && due.getTime() < Date.now() && !TERMINAL.has(t.status);
-  return h`<div class="rd-meta">
-    ${statusBadge(t.status)}${levelBadge(t, { full: true })}${t.priority != null ? h`<span class="meta-i">${prioIcon(t.priority)}<span>P${t.priority}</span></span>` : ''}
-    ${t.category ? meta('layers', catLabel(t.category)) : ''}${t.kind ? meta('hash', META.kinds[t.kind] || t.kind) : ''}
-    <span class="meta-i">${execAvatar(t.executor, { size: 18, tip: false })}<span>${execLabel(t.executor)}</span></span>
+  return h`<div class="rd-meta slim">
+    ${SECTION_OF_STATUS[t.status] ? '' : statusBadge(t.status)}
     ${t.project ? meta('folder', t.project) : ''}
     ${due ? h`<span class="meta-i${overdue ? ' tone-crit' : ''}" data-tip="${absTime(t.due_at, true)}">${icon('calendar', { size: 13 })}<span>${overdue ? '已逾期 · ' : '截止 '}${absTime(t.due_at)}</span></span>` : ''}
-    ${t.cost_usd ? meta('dollar', usd(t.cost_usd)) : ''}${t.attempts ? meta('rotate', `尝试 ${t.attempts}/${t.max_attempts}`) : ''}
-    ${t.source ? meta(sourceIcon(t.source), sourceLabel(t.source)) : ''}
-    <span class="meta-i" data-tip="创建 ${absTime(t.created_at, true)}">${icon('clock', { size: 13 })}<span>更新 ${absTime(t.updated_at)}</span></span>
-    <button type="button" class="meta-i meta-id" data-act="copy" data-text="${t.id}" data-tip="复制任务 ID">${icon('copy', { size: 12 })}<span class="mono">${shortId(t.id)}</span></button></div>`;
+    <span class="meta-i" data-tip="创建 ${absTime(t.created_at, true)}">${icon('clock', { size: 13 })}<span>更新 ${absTime(t.updated_at)}</span></span></div>`;
+}
+/** The technical fields the old header carried (level, priority, executor, cost, id ...), now one folded list. */
+function taskDetails(t, dg) {
+  return detailList([
+    ['完整标题', dg.headline !== t.title ? t.title : ''], ['状态', statusBadge(t.status)], ['自主等级', levelBadge(t, { full: true })],
+    ['优先级', t.priority != null ? h`${prioIcon(t.priority)} P${t.priority}` : ''], ['类别', t.category ? catLabel(t.category) : ''], ['类型', t.kind ? (META.kinds[t.kind] || t.kind) : ''],
+    ['执行器', executorOf(t) ? h`${execAvatar(executorOf(t), { size: 18, tip: false })} ${execLabel(executorOf(t))}` : ''], ['成本', t.cost_usd ? usd(t.cost_usd) : ''],
+    ['尝试', t.attempts ? `${t.attempts}/${t.max_attempts}` : ''], ['来源', t.source ? h`${icon(sourceIcon(t.source), { size: 13 })} ${sourceLabel(t.source)}` : ''],
+    ['创建', absTime(t.created_at)], ['关键词', dg.keywords.length ? kwChips(dg.keywords, { max: 8, act: 'kw-filter' }) : ''],
+    ['任务编号', h`<button type="button" class="meta-i meta-id" data-act="copy" data-text="${t.id}" data-tip="复制任务 ID">${icon('copy', { size: 12 })}<span class="mono">${shortId(t.id)}</span></button>`],
+  ]);
 }
 
 function treeNode(n) {
@@ -258,7 +282,7 @@ ACTS['edit-task'] = (el) => editTaskDialog(el.dataset.id, CACHE.tasks.get(el.dat
 CHANGES['set-level'] = (el) => patchTask(el.dataset.id, { level: Number(el.value) }, `等级已改为 L${el.value}（已锁定）`);
 CHANGES['set-priority'] = (el) => patchTask(el.dataset.id, { priority: Number(el.value) }, `优先级已改为 P${el.value}`);
 CHANGES['set-category'] = (el) => patchTask(el.dataset.id, { category: el.value }, '类别已更新');
-CHANGES['set-executor'] = (el) => patchTask(el.dataset.id, { executor: el.value }, `执行器已改为 ${el.value}`);
+CHANGES['set-executor'] = (el) => patchTask(el.dataset.id, { executor: el.value }, el.value ? `已指定 ${el.value} 来做` : '已改为自动分配');
 
 export function taskReader(d, { mode = 'pane' } = {}) {
   const t = d.task; cacheTask(t);
@@ -276,24 +300,25 @@ export function taskReader(d, { mode = 'pane' } = {}) {
   const firstPrev = arts.findIndex((a) => a.previewable && ['.md', '.markdown', '.txt', '.json'].includes(a.ext));
   const result = t.result && typeof t.result === 'object' ? t.result : null;
   const topic = t.topic || d.topic || CACHE.topicOf.get(t.id) || null;
+  const askSec = SECTION_OF_STATUS[t.status] || null;
 
   return h`<article class="reader" data-reader="task" data-id="${t.id}">
     <header class="rd-head">
       ${crumbs.length ? h`<nav class="rd-crumbs" aria-label="层级">${crumbs.map(([label, p]) => h`<button type="button" data-act="open-task" data-id="${p.id}"><span class="muted">${label}</span> ${cut(p.headline || p.title, 36)}</button>`)}</nav>` : ''}
-      <h1 class="rd-title">${dg.headline}</h1>
+      ${askKicker(askSec, urgencyOf({ kind: 'task', section: askSec, due_at: t.due_at, ts: t.updated_at }))}
+      <h1 class="rd-title">${plainHeadline(askSec, dg.headline)}</h1>
       ${dg.gist ? h`<p class="rd-gist">${dg.gist}${dg.auto ? h` <span class="auto-tag" data-tip="尚未生成 AI 摘要，此为规则推导">规则摘要</span>` : ''}</p>` : ''}
-      ${dg.headline !== t.title ? h`<p class="rd-full">${t.title}</p>` : ''}
       ${metaRow(t)}
-      ${dg.keywords.length ? h`<div class="rd-kws">${kwChips(dg.keywords, { max: 8, act: 'kw-filter' })}</div>` : ''}
     </header>
     ${actionBar(t, { shortcuts: mode === 'pane' })}
     <div class="rd-body">
-      ${recapCard({ id: t.id, topic, ts: t.created_at, extraIds: pendingApv.map((a) => a.id) })}
+      ${askSec ? todoBlock(askSec) : ''}
       ${suggested ? callout('AI 建议', h`${t.level_reason ? md(t.level_reason) : h`<p>分拣后没有自动启动，等你决定是否接受。</p>`}<p class="callout-s">接受后将按 <b>${levelName(e)}</b> 推进：${L.deliverable || ''}</p>`, { icon: 'sparkles' }) : ''}
       ${t.status === 'failed' ? callout('失败原因', h`${t.status_reason ? h`<p>${t.status_reason}</p>` : ''}${lastErr ? h`<pre class="errbox">${lastErr.error}</pre>` : ''}`, { tone: 'crit', icon: 'circle-x' }) : ''}
-      ${pendingApv.length ? sec('等你批准', h`${pendingApv.map((a) => h`<div class="apv-inline"><div class="apv-inline-h">${riskBadge(a.risk)}${badge(META.apvKind[a.kind] || a.kind)}${a.action_type ? h`<code>${a.action_type}</code>` : ''}<b>${a.title}</b></div>
+      ${pendingApv.length ? sec('等你批准', h`${pendingApv.map((a) => h`<div class="apv-inline"><div class="apv-inline-h">${a.risk === 'high' ? riskBadge(a.risk) : ''}<b>${a.title}</b></div>
           ${a.recommendation ? callout('AI 建议', md(a.recommendation), { icon: 'sparkles' }) : ''}${a.context_md ? md(a.context_md) : ''}${a.payload != null ? h`<details><summary class="small muted">批准后将执行的内容</summary>${payloadView(a.payload)}</details>` : ''}${decisionBlock(a, { compact: true })}</div>`)}`, { icon: 'shield-alert', count: pendingApv.length, cls: 'sec-attn' }) : ''}
       ${showSummaryHero ? callout('AI 产出 / 摘要', md(t.summary), { tone: 'brand', icon: 'sparkles' }) : t.summary ? sec('AI 产出 / 摘要', md(t.summary), { icon: 'sparkles' }) : ''}
+      ${recapCard({ id: t.id, topic, ts: t.created_at, extraIds: pendingApv.map((a) => a.id) })}
       ${t.description ? sec('描述', md(t.description), { icon: 'file-text' }) : ''}
       ${t.acceptance ? sec('验收标准', md(t.acceptance), { icon: 'check-check' }) : ''}
       ${sec('来源与原文', h`<div data-lazy="evidence" data-task="${t.id}">${h`<div class="skel-block">${skel('45%', 12)}${skel('100%', 10)}${skel('92%', 10)}</div>`}</div>`, { icon: 'mail', count: null, id: `ev-${t.id}`, open: !showSummaryHero })}
@@ -304,11 +329,12 @@ export function taskReader(d, { mode = 'pane' } = {}) {
       ${d.notes?.length ? sec('备注', h`<ul class="notes">${d.notes.slice().reverse().map((n) => h`<li><div class="note-t">${n.text}</div><div class="note-m">${n.by} · ${absTime(n.ts)}</div></li>`)}</ul>`, { icon: 'pencil', count: d.notes.length, open: false }) : ''}
       ${result ? sec('结构化结果', h`${result.verification ? h`<p class="small"><b>验证：</b>${jsonText(result.verification, 1500)}</p>` : ''}<pre class="code">${jsonText(result, 20000)}</pre>`, { icon: 'file', open: false }) : ''}
       ${t.plan ? sec('执行计划', h`<pre class="code">${jsonText(t.plan, 20000)}</pre>`, { icon: 'list', open: false }) : ''}
-      ${sec('属性与设置', h`<div class="form-grid props">
+      ${routingSection(t)}
+      ${sec('详细信息与设置', h`${taskDetails(t, dg)}<div class="form-grid props">
         <label class="field"><span>自主等级</span><select class="select" data-change="set-level" data-id="${t.id}">${options(LEVEL_OPTS(), t.level)}</select></label>
         <label class="field"><span>优先级</span><select class="select" data-change="set-priority" data-id="${t.id}">${options(PRIO_OPTS, t.priority)}</select></label>
         <label class="field"><span>类别</span><select class="select" data-change="set-category" data-id="${t.id}">${options(META.categories, t.category)}</select></label>
-        <label class="field"><span>执行器</span><select class="select" data-change="set-executor" data-id="${t.id}">${options(Object.fromEntries(META.executors.map((x) => [x, x])), t.executor)}</select></label></div>
+        <label class="field"><span>执行器</span><select class="select" data-change="set-executor" data-id="${t.id}"><option value=""${pinnedExec(t) ? '' : raw(' selected')}>自动分配（按重要性和难度）</option>${options(Object.fromEntries(META.executors.map((x) => [x, x])), pinnedExec(t))}</select></label></div>
         <p class="hint">${levelName(e)}：${L.deliverable || ''}　交接点：${L.handoff || ''}${t.level_cap && t.level_cap < t.level ? h`　<b>策略上限 L${t.level_cap}</b>（评估 L${t.level}）` : ''}</p>
         <div class="row">${btn('编辑标题 / 描述 / 验收标准…', { act: 'edit-task', data: { id: t.id }, size: 'sm', icon: 'pencil' })}${btn('在任务表中查看运行', { href: `#/runs?task_id=${enc(t.id)}`, size: 'sm', variant: 'ghost', icon: 'play' })}</div>
         ${t.workspace ? h`<p class="hint">工作区：<span class="mono">${t.workspace}</span></p>` : ''}`, { icon: 'wrench', open: false })}
@@ -322,41 +348,48 @@ export function approvalReader(d, { mode = 'pane' } = {}) {
   const t = d.task;
   if (t) cacheTask(t);
   const dg = digestOf(a, 'approval');
-  const cd = countdown(a.expires_at);
   const pending = a.status === 'pending';
+  const section = a.kind === 'decision' ? 'decision' : 'approval';
+  const urg = pending ? urgencyOf({ kind: 'approval', section, status: a.status, expires_at: a.expires_at, risk: a.risk, ts: a.created_at }) : null;
+  const cd = countdown(a.expires_at);
   const recKey = recommendedKey(a);
   const recOpt = (a.options || []).find((o) => o.key === recKey);
-  // The model recommends with an option key ("approve", "A：…"): show the option's name instead of the bare key.
+  // The model recommends with an option key ("approve", "A：…"): say the option's name, then only the reason.
   const rc = String(a.recommendation || '').trim();
-  let recText = rc;
+  let reason = rc;
   if (recOpt) {
+    const names = [recOpt.key, recOpt.label].filter(Boolean).map((x) => String(x).toLowerCase());
     const m = rc.match(/^([^：:\s]+)\s*[：:]\s*([\s\S]*)$/);
-    if (m && m[1].toLowerCase() === String(recOpt.key).toLowerCase()) recText = `${recOpt.label || recOpt.key}：${m[2]}`;
-    else if (rc.toLowerCase() === String(recOpt.key).toLowerCase()) recText = recOpt.description || `选「${recOpt.label || recOpt.key}」`;
+    if (m && names.includes(m[1].toLowerCase())) reason = m[2];
+    else if (names.includes(rc.toLowerCase())) reason = '';
   }
+  const rec = a.recommendation ? h`<div class="rd-rec"><div class="rd-rec-h">${icon('sparkles', { size: 14 })}<span>AI 建议</span>${recOpt ? h`<b>${recOpt.label || recOpt.key}</b>` : ''}</div>
+      ${recOpt?.description ? h`<p class="rd-rec-d">选它会：${recOpt.description}</p>` : ''}${reason ? h`<div class="rd-rec-why">${md(reason)}</div>` : ''}</div>` : '';
   const topic = a.topic || d.topic || (t && t.topic) || CACHE.topicOf.get(a.id) || null;
+  const details = detailList([
+    ['完整标题', dg.headline !== a.title ? a.title : ''], ['状态', apvBadge(a.status)], ['风险', riskBadge(a.risk)], ['类型', META.apvKind[a.kind] || a.kind],
+    ['动作', a.action_type ? h`<code>${a.action_type}</code>` : ''], ['创建', absTime(a.created_at)],
+    ['过期', a.expires_at && pending ? h`<span data-countdown="${a.expires_at}" data-suffix="${a.default_on_expiry ? `（默认：${a.default_on_expiry}）` : ''}">${cd.text}${a.default_on_expiry ? `（默认：${a.default_on_expiry}）` : ''}</span>` : ''],
+    ['来源运行', a.run_id ? h`<button type="button" class="linkish" data-act="open-run" data-id="${a.run_id}">查看运行记录</button>` : ''],
+    ['关键词', dg.keywords.length ? kwChips(dg.keywords, { max: 8, act: 'kw-filter' }) : ''],
+    ['编号', h`<button type="button" class="meta-i meta-id" data-act="copy" data-text="${a.id}" data-tip="复制 ID">${icon('copy', { size: 12 })}<span class="mono">${shortId(a.id)}</span></button>`],
+  ]);
   return h`<article class="reader" data-reader="approval" data-id="${a.id}">
     <header class="rd-head">
       ${t ? h`<nav class="rd-crumbs"><button type="button" data-act="open-task" data-id="${t.id}"><span class="muted">任务</span> ${cut(t.headline || t.title, 44)}</button></nav>` : ''}
-      <h1 class="rd-title">${dg.headline}</h1>
+      ${pending ? askKicker(section, urg) : h`<div class="rd-ask tone-muted">${apvBadge(a.status)}</div>`}
+      <h1 class="rd-title">${pending ? plainHeadline(section, dg.headline) : dg.headline}</h1>
       ${dg.gist ? h`<p class="rd-gist">${dg.gist}${dg.auto ? h` <span class="auto-tag" data-tip="尚未生成 AI 摘要，此为规则推导">规则摘要</span>` : ''}</p>` : ''}
-      ${dg.headline !== a.title ? h`<p class="rd-full">${a.title}</p>` : ''}
-      <div class="rd-meta">${apvBadge(a.status)}${riskBadge(a.risk)}${badge(META.apvKind[a.kind] || a.kind, { icon: a.kind === 'decision' ? 'scale' : 'send' })}
-        ${a.action_type ? h`<span class="meta-i"><code>${a.action_type}</code></span>` : ''}
-        <span class="meta-i" data-tip="${absTime(a.created_at, true)}">${icon('clock', { size: 13 })}<span>创建 ${absTime(a.created_at)}</span></span>
-        ${a.expires_at && pending ? h`<span class="meta-i cd-${cd.state}" data-countdown="${a.expires_at}" data-suffix="${a.default_on_expiry ? `（默认：${a.default_on_expiry}）` : ''}">${icon('hourglass', { size: 13 })}<span>${cd.text}${a.default_on_expiry ? `（默认：${a.default_on_expiry}）` : ''}</span></span>` : ''}
-        ${a.run_id ? h`<button type="button" class="meta-i" data-act="open-run" data-id="${a.run_id}">${icon('play', { size: 13 })}<span>来源运行</span></button>` : ''}
-        <button type="button" class="meta-i meta-id" data-act="copy" data-text="${a.id}" data-tip="复制 ID">${icon('copy', { size: 12 })}<span class="mono">${shortId(a.id)}</span></button></div>
-      ${dg.keywords.length ? h`<div class="rd-kws">${kwChips(dg.keywords, { max: 8, act: 'kw-filter' })}</div>` : ''}
+      <div class="rd-meta slim"><span class="meta-i" data-tip="${absTime(a.created_at, true)}">${icon('clock', { size: 13 })}<span>创建 ${absTime(a.created_at)}</span></span></div>
     </header>
     <div class="rd-body">
+      ${pending ? todoBlock(section, h`${rec}${optionDetails(a)}`) : ''}
       ${recapCard({ id: a.id, topic, ts: a.created_at })}
-      ${a.recommendation ? callout(recOpt ? `AI 建议：${recOpt.label || recOpt.key}` : 'AI 建议', md(recText), { icon: 'sparkles' }) : ''}
-      ${pending ? optionDetails(a) : ''}
-      ${a.context_md ? sec('背景', md(a.context_md), { icon: 'file-text' }) : ''}
       ${a.payload != null && a.payload !== '' ? sec('批准后将执行的内容', payloadView(a.payload), { icon: 'send', open: a.kind === 'action' }) : ''}
       ${!pending ? sec('处理结果', h`${decisionBlock(a)}${a.result ? h`<pre class="code">${jsonText(a.result, 8000)}</pre>` : ''}`, { icon: 'check-check' }) : ''}
+      ${a.context_md ? sec('背景', md(a.context_md), { icon: 'file-text', open: false }) : ''}
       ${t ? sec('来源与原文', h`<div data-lazy="evidence" data-task="${t.id}">${h`<div class="skel-block">${skel('45%', 12)}${skel('100%', 10)}${skel('92%', 10)}</div>`}</div>`, { icon: 'mail', open: false }) : ''}
+      ${sec('详细信息', details, { icon: 'wrench', open: false })}
       ${sec('时间线', timeline(d.events || []), { icon: 'history', count: (d.events || []).length, open: false })}
     </div>
     ${pending ? h`<section class="rd-decide${decideCollapsed() ? ' collapsed' : ''}"><h3>${icon('shield-alert', { size: 16 })}你的决定${mode === 'pane' ? h`${kbd('E')}<small class="muted">选中 AI 推荐项</small>` : ''}<button type="button" class="rd-decide-toggle" data-act="toggle-decide" aria-expanded="${!decideCollapsed()}">${decideCollapsed() ? '展开选项' : '收起'}</button></h3>${decisionBlock(a, { terse: true })}</section>` : ''}</article>`;

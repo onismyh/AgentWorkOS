@@ -34,7 +34,7 @@ TRIAGE = """\
 {open_tasks}
 
 ## 系统能力（决定等级时要考虑）
-- 执行器：codex（编码、调试、数据分析、联网检索、通过连接器只读访问 Gmail/Notion/Google Drive）、claude（写作、润色、文档 docx/pdf/pptx/xlsx 处理、总结）。
+- 执行器：codex（编码、调试、数据分析、联网检索、通过连接器只读访问 Gmail/Notion/Google Drive）、claude（写作、润色、文档 docx/pdf/pptx/xlsx 处理、总结）；另有低成本的 pi、dsh（DeepSeek），系统会把简单、不急、不含邮件内容的整理和分析自动交给它们，所以 priority 和 difficulty 要如实给，不必迁就某个执行器。
 - 能读取用户的本地项目目录（论文、代码、数据），能在隔离工作区里产出文件。
 - 不能：代替用户本人发言、提交、签字、付款、参加会议；所有对外动作都要用户在 Outbox 批准。
 
@@ -57,6 +57,7 @@ priority：0=今天必须处理或阻塞他人，1=本周，2=两周内，3=有�
 8. title 用简短的中文动宾短语；description 写清楚背景、来源、为什么重要、建议的第一步；acceptance 写"做完"的可检查标准。
 9. due_at 只在输入中有明确日期时填写（YYYY-MM-DD）。
 10. 每个 item 还要给"卡片摘要"，用户在收件箱和看板里首先看到的就是它：headline（≤26 个汉字，动词开头、具体）、gist（≤50 个汉字，说明现状或为什么需要用户，没有就留空字符串）、keywords（3–5 个，人名/项目/平台/文件/状态，避免"任务""处理"这类泛词）。对 ignore 的 item 这三项可以简短。
+11. difficulty：这件事本身有多难（easy=常规整理、一步可完成；medium=需要多步或一定判断；hard=需要深度推理、跨文件大改动或出错代价高）。executor_hint 只是建议，系统会按重要性、难度和内容是否敏感来最终分配。
 
 ## 新输入
 <untrusted>
@@ -88,7 +89,8 @@ PLAN = """\
 - 子任务 2–6 个，粒度为一个 Agent 用 5–30 分钟能完成的量；每个都要有明确的 acceptance。
 - depends_on 引用其他子任务的 key；没有依赖的子任务会**并行**执行。不能有环。
 - 子任务的 level 不能超过父任务的 L{level}；对外动作（发信、发布等）不要单独拆成子任务，留给父任务汇总时走 Outbox。
-- executor_hint：编码/数据/检索选 codex，写作/文档选 claude，不确定就填 null。
+- executor_hint：只是建议，最终由系统按重要性和难度分配。编码/数据/检索倾向 codex，写作/文档倾向 claude，不确定就填 null。
+- difficulty：这一步本身有多难：easy=常规整理、一步可完成；medium=需要多步或一定判断；hard=需要深度推理、跨文件大改动或出错代价高。
 - synthesis 说明父任务最后如何汇总子任务成果。
 
 只输出符合 schema 的 JSON。"""

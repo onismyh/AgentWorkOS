@@ -7,6 +7,11 @@
 .sp-chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -12px; padding: 0 12px 1px; -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 18px), transparent 100%); mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 18px), transparent 100%); }
 .sp-chips::-webkit-scrollbar { display: none; }
 .sp-chips .chip-f { flex: none; }
+.sp-more > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: var(--r-pill); color: var(--muted-fg); font-size: 12px; transition: background-color 0.25s, color 0.25s; }
+.sp-more > summary::-webkit-details-marker { display: none; }
+.sp-more > summary:hover { background: var(--hover); color: var(--fg); }
+.sp-more[open] { flex-basis: 100%; }
+.sp-more-b { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 0 2px; }
 .sp-modes { gap: 6px; }
 .sp-scroll .tgroup:first-child { margin-top: 10px; }
 .tgroup { margin: 0 10px 10px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; }
@@ -24,7 +29,8 @@
 .tg-dot { display: none; width: 7px; height: 7px; border-radius: 50%; background: var(--brand); flex: none; }
 .tg-dot.on { display: inline-block; }
 .tg-title { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 650; letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tg-age { display: inline-flex; align-items: center; gap: 3px; flex: none; font-size: 11.5px; color: var(--tone-ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tg-need { flex: none; margin-left: auto; font-size: 12px; font-weight: 600; color: var(--warn-ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tg-age { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: var(--r-pill); flex: none; font-size: 11px; background: var(--tone-soft); color: var(--tone-ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .tg-age.tone-crit, .tg-age.tone-warn { font-weight: 600; }
 .tg-l2 { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
 .tg-counts { display: inline-flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
@@ -38,10 +44,6 @@
 .tgroup > .srow:hover { background: var(--hover); }
 .tgroup > .srow.sel { background: var(--brand-soft); }
 .tgroup > .srow:last-child { border-bottom: 0; }
-.sr-tp { display: inline-flex; align-items: center; gap: 3px; min-width: 0; max-width: 130px; height: 20px; padding: 0 6px; border-radius: 5px; border: 1px solid var(--border); color: var(--fg-2); font-size: 11.5px; }
-.sr-tp span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sr-tp .ic { flex: none; color: var(--muted-fg); }
-.sr-sec { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 4px; background: var(--tone-soft); color: var(--tone-ink); font-size: 11px; font-weight: 600; flex: none; }
 
 /* =================================================================== topic reader */
 .tp-head { padding-bottom: 12px; }
@@ -61,6 +63,9 @@
 
 /* ---- "现在需要你": one compact card per open item ---- */
 .need-list { display: grid; gap: 12px; }
+.need-verb { display: inline-flex; align-items: center; gap: 5px; color: var(--tone-ink); font-size: 12.5px; }
+.need-verb b { font-weight: 650; }
+.need-count { color: var(--warn-ink); font-weight: 600; }
 .need { display: grid; gap: 8px; padding: 12px 14px 10px; border: 1px solid var(--border); border-left: 3px solid var(--tone); border-radius: var(--r-lg); background: var(--surface); }
 .need-h { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .need-w { color: var(--muted-fg); font-size: 11.5px; }

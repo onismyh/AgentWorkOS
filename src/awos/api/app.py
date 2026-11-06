@@ -34,6 +34,7 @@ from ..brain import projects as projects_mod, summarize, topics as topics_mod
 from ..bus import bus
 from . import board as board_mod
 from . import diagnose
+from . import timeline as timeline_mod
 from ..config import load_config
 from ..db import loads, parse_ts, q, q1, utcnow
 from ..engine import actions
@@ -177,6 +178,21 @@ class TaskPatch(BaseModel):
 class DecisionBody(BaseModel):
     option: str = Field(min_length=1, max_length=100)
     note: str | None = Field(None, max_length=20000)
+
+
+class MilestoneBody(BaseModel):
+    project_key: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=120)
+    summary: str | None = Field(default=None, max_length=1000)
+    target_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    status: str | None = Field(default=None, pattern=r"^(planned|active|done|missed)$")
+
+
+class MilestonePatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    summary: str | None = Field(default=None, max_length=1000)
+    target_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    status: str | None = Field(default=None, pattern=r"^(planned|active|done|missed)$")
 
 
 class FactBody(BaseModel):
@@ -1119,6 +1135,34 @@ def create_app(*, token: str | None = None, port: int | None = None, extra_hosts
         from ..brain import whiteboard
         return {"title": whiteboard.TITLE, "rules": [{k: f[k] for k in ("id", "key", "value", "source", "updated_at")}
                                                      for f in whiteboard.rules()]}
+
+    # ---- project timeline + milestones (api/timeline.py; the board's 项目时间线 mode) ----------------------------------------
+    @app.get("/api/timeline")
+    def timeline_lanes() -> dict:
+        return timeline_mod.lanes()
+
+    @app.get("/api/projects/{key:path}/timeline")
+    def project_timeline(key: str) -> dict:
+        return _require(timeline_mod.project_timeline(key), key)
+
+    @app.post("/api/milestones", status_code=201)
+    def milestone_add(body: MilestoneBody) -> dict:
+        if body.project_key != timeline_mod.UNASSIGNED and not any(p["key"] == body.project_key for p in projects_mod.canonical_projects()):
+            raise HTTPException(422, f"unknown project {body.project_key!r}")
+        mid = repo.create_milestone(body.project_key, body.title.strip(), summary=(body.summary or "").strip() or None, target_date=body.target_date or None,
+                                    status=body.status or "planned")
+        return {"id": mid, "milestone": repo.get_milestone(mid)}
+
+    @app.patch("/api/milestones/{milestone_id}")
+    def milestone_update(milestone_id: str, body: MilestonePatch) -> dict:
+        m = repo.update_milestone(milestone_id, body.model_dump(exclude_unset=True))
+        return {"milestone": _require(m, milestone_id)}
+
+    @app.delete("/api/milestones/{milestone_id}")
+    def milestone_delete(milestone_id: str) -> dict:
+        _require({"id": milestone_id} if repo.delete_milestone(milestone_id) else None, milestone_id)
+        return {"ok": True}
+    # ---- end project timeline ----------------------------------------------------------------------------------------------
 
     @app.post("/api/context", status_code=201)
     def context_add(body: FactBody) -> dict:

@@ -113,6 +113,17 @@ inbox ─triage─► triaged ─(自动启动 or 用户接受)─► ready ─c
 
 **执行结果合同**（`brain/schemas.py::EXECUTE_SCHEMA`）：`status`、`summary`、`deliverables[]`、`verification{}`、`proposed_actions[]`、`decisions_needed[]`、`subtasks[]`、`followups[]`、`context_updates[]`。其中 `proposed_actions` 和 `decisions_needed` 会自动转成 Outbox 条目；`subtasks` 会生成子任务 DAG。
 
+
+### 任务分配（`engine/router.py`）
+
+谁来干一个任务，看三件事（理由写进 `task.meta.routing`，任务页“分配依据”里能看到）：
+
+- **重要性**：P0、3 天内截止、或结果会交到别人手里（comms/career/admin/schedule 的 L3 以上）算“重要”；P3 算“不急”；其余一般。
+- **难度**：分诊给的 `difficulty`（easy/medium/hard）优先，否则按 L 等级、是否要改代码或数据、材料多少估；失败过两次或返工过都会升一档（升级链）。
+- **内容敏感度**：含邮件原文或个人事务类别（`routing.private_categories`）只交给 Codex / Claude，DeepSeek 通道（pi / dsh）永远拿不到；验证者同理。
+
+重要性 × 难度 → 档位：**经济档**（例行、不急）先 dsh / pi，再 codex / claude 兜底；**标准档**先 codex（订阅制，没有边际成本）再 dsh；**高级档**（难或重要）先 claude / codex，便宜的只做最后选择。每档的顺序在 `config/awos.toml` 的 `[routing.tiers.*]`，只读分析和动手写分开配（pi 没有沙箱，只做只读）。标准档和高级档里，该类别最擅长的执行器排前面（`[routing.affinity]`），分诊的 `executor_hint` 只是软建议（经济档不采纳）；用户自己在任务里指定的执行器永远排第一（`meta.executor_pinned`），但仍受敏感度限制。今日额度用完的执行器排到最后，用到 85% 以上且任务不重要时后移。该档位没有可用执行器时退回类别默认路线 `routing.<category>`（后台的分诊 / 规划 / 简报等仍用这些路线，只交给 codex / claude）。执行失败后的自动切换沿用同一个顺序。重要的 L3 工作和所有 L4 / L5 工作会再让另一个（优先便宜的）执行器独立质检。
+
 ## 6. 调度与可靠性（`engine/`）
 
 - **Tick（默认 15 秒）**：到期传感器 → triage 新 signal → 过期审批 → 依赖解锁（blocked→ready）→ 认领 ready 任务并分派到 worker 线程（全局并发 + 每个执行器并发上限 + 预算）→ 心跳续约 → 摘要推送。
@@ -140,6 +151,11 @@ inbox ─triage─► triaged ─(自动启动 or 用户接受)─► ready ─c
 ## 9. 可观测性：Dashboard（`api/` + `dashboard/`）
 
 页面：总览（健康状况、预算、队列）、Inbox、任务（列表 / 树状 DAG / 详情）、Outbox、运行（实时日志 + 工具调用）、工具调用记录、异常、交付物、上下文、传感器、历史（审计事件）。
+
+
+**项目时间线与里程碑**（看板顶部切换“任务看板 | 项目时间线”，`#/board?mode=timeline&project=<key>`；`api/timeline.py`）：按项目回答三个问题——Agent 给你干了什么、干成什么样、你人为干预了什么。数据全部在读取时从 tasks、runs、approvals、artifacts、审计 events 和上下文事实推出，只有 `milestones` 表是自己的。任务归项目的顺序：话题关联，其次 `tasks.project` 和父任务，最后项目名特征词匹配（其余汇成“未归类”）。页面从上到下：统计（Agent 做了 / 完成 / 你干预了 / 等你处理 / 花费）、里程碑横轴、任务流程图（纯内联 SVG：任务方框 + 你拍板的节点，点方框开任务）、按天分组的动态流（你的操作蓝色加“你”头像，Agent 事件带各自执行器头像；筛选“全部 / Agent 做的 / 我干预的 / 异常”；事件只带短摘要不放原始日志，图片交付物显示缩略图）。你的干预是一等公民：审批、选择、拒绝、返工、取消、忽略、验收、推迟、新建任务、重新来过、改归属、里程碑编辑。里程碑 = 你手动设定的行（增删改走 `/api/milestones`）加自动推出的截止日期和 L4/L5 完成的交付（标“自动”，不可编辑）；已过目标日期仍是“计划中”的算逾期。
+
+**收件箱的读法**（`js/domain/readable.js`）：每行一句白话结论或要求（“要你决定：…”“要你批准：…”“待你验收：…”“需要你接手：…”）加“AI 建议：…”，右侧只留一个相对时间和至多一个紧迫标记；项目标题写“N 项要你处理”和一句当前状态；风险 / 等级 / 优先级徽章、关键词标签、编号和成本折叠进阅读页的“详细信息”。阅读页先给“你需要做什么”（高亮 AI 推荐），再是前情提要，背景、来源、选项含义、时间线都折叠。
 
 **外观（`dashboard/css/glass.css`，最后加载）**：对齐 macOS 的玻璃质感——页面背后是柔和壁纸，侧栏悬浮、工具栏毛玻璃（内容从它下面滑过）、卡片/抽屉/弹窗半透明加模糊，系统蓝作唯一强调色。动效是“流水”式：切换页面时可见的卡片按 `--i` 依次升起（只在导航时播放，SSE 实时刷新不重播），KPI 数字滚动，进度条生长，按压有轻微弹簧回弹，侧栏高亮块在条目之间滑动。`prefers-reduced-motion` 关闭动画，`prefers-reduced-transparency` 或不支持 `backdrop-filter` 时退回实色。总览页的“白板”卡片（`/api/whiteboard`）显示所有 Agent 共同遵守的规则，可在卡片上直接添加，管理在上下文页。
 操作：重试 / 取消 / 修改等级与优先级 / 驳回 / 推迟 / 新建任务 / 审批 / 立即运行传感器 / 编辑上下文。

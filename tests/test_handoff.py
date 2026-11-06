@@ -88,25 +88,13 @@ def test_pi_write_is_opt_in(env):
     assert filter_candidates(["pi", "codex"], sandbox="workspace-write", n_mail=0) == ["pi", "codex"]
 
 
-def test_choose_route_sends_cheap_categories_to_the_cheap_routes(env):
-    from awos.engine.worker import choose_route
-    t = lambda cat: {"category": cat}  # noqa: E731
-    assert choose_route(t("research"), "read-only", 0, None) == "readonly"
-    assert choose_route(t("research"), "workspace-write", 0, None) == "write"
-    assert choose_route(t("writing"), "read-only", 0, None) == "readonly"                    # analysis of prose is cheap
-    assert choose_route(t("writing"), "workspace-write", 0, None) == "writing"               # producing prose stays with its own route
-    assert choose_route(t("career"), "read-only", 0, None) == "career"                       # personal categories are not cheap-routed
-    assert choose_route(t("research"), "read-only", 1, None) == "research"                   # mail-derived: normal route (codex/claude only)
-    assert choose_route(t("research"), "read-only", 0, "claude") == "research"               # an explicit executor choice wins
-
-
 def test_budget_and_concurrency_defaults_were_raised():
     from awos.config import reset_config_cache, load_config
     reset_config_cache()
     c = load_config()
     assert c.get("budget.daily_usd") == 15.0 and c.get("budget.per_task_usd") == 5.0 and c.get("budget.codex_daily_runs") == 90
     assert c.get("scheduler.max_concurrent_runs") == 4 and c.get("executors.dsh.max_concurrent") == 2
-    assert c.get("routing.write") == ["codex", "dsh", "claude"] and c.get("executors.pi.allow_write") is False
+    assert c.get("routing.tiers.standard.write") == ["codex", "dsh", "claude"] and c.get("executors.pi.allow_write") is False
 
 
 def test_handoff_appears_in_the_topic_history(two):

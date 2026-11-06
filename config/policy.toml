@@ -36,5 +36,5 @@ expiry_hours = { low = 72, medium = 72, high = 48 }
 
 [verify]
 # Levels whose results get an independent verification pass by a second executor before delivery.
-levels = [5]
+levels = [4, 5]   # important (P0/P1 or high-stakes) L3 work is verified too, see engine/router.py
 min_score = 7

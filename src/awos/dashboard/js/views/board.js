@@ -12,6 +12,7 @@ import { toast } from '../ui/overlay.js';
 import { META, digestOf, catLabel, effLevel, TERMINAL } from '../domain/vocab.js';
 import { taskAction, taskActionUndoable } from '../domain/actions.js';
 import { loadProjects, projectOfTopic } from '../domain/projects.js';
+import timeline, { modeSwitch } from './project-timeline.js';
 
 const COL_VIEW = {
   suggested: { icon: 'circle-dashed', tone: 'brand' }, queued: { icon: 'circle-half', tone: 'muted' }, running: { icon: 'loader', tone: 'brand', spin: true },
@@ -41,7 +42,8 @@ async function fallbackBoard() {
     totals: { open: 0, done_7d: 0 }, updated_at: null,
   };
 }
-export async function load() {
+export async function load(params) {
+  if (params?.get?.('mode') === 'timeline') return timeline.load(params);   // 项目时间线 mode (views/project-timeline.js)
   const [board] = await Promise.all([apiOpt('/board'), loadProjects().catch(() => null)]);   // the project list maps topics to projects (chips, lanes)
   const d = board || (await fallbackBoard());
   d.columns.forEach((c) => c.items.forEach(cacheTask));
@@ -128,7 +130,7 @@ function toolbar(d) {
   const sel = (key, label, opts) => h`<select class="select select-sm" data-change="board-f" data-key="${key}" aria-label="${label}"><option value="">${label}</option>${opts.map(([v, l]) => h`<option value="${v}"${B.f[key] === String(v) ? raw(' selected') : ''}>${l}</option>`)}</select>`;
   const shown = d.columns.reduce((s, c) => s + c.items.filter(matches).length, 0);
   const total = d.columns.reduce((s, c) => s + c.items.length, 0);
-  return h`<div class="toolbar"><div class="search-box">${icon('search', { size: 15 })}<input class="input input-bare" type="search" id="board-q" data-input="board-q" placeholder="筛选卡片：标题、关键词、项目…" value="${B.f.q}" aria-label="筛选卡片" autocomplete="off"></div>
+  return h`<div class="toolbar">${modeSwitch('board')}<div class="search-box">${icon('search', { size: 15 })}<input class="input input-bare" type="search" id="board-q" data-input="board-q" placeholder="筛选卡片：标题、关键词、项目…" value="${B.f.q}" aria-label="筛选卡片" autocomplete="off"></div>
     ${sel('level', '全部等级', [1, 2, 3, 4, 5].filter((n) => all.some((t) => effLevel(t) === n)).map((n) => [n, `L${n} ${(META.levels[n]?.name || '').replace(/^L\d\s*/, '')}`]))}
     ${sel('category', '全部类别', uniq((t) => t.category).map((c) => [c, catLabel(c)]))}
     ${sel('project', '全部项目', uniq(projectName).map((p) => [p, p]))}
@@ -139,6 +141,7 @@ function toolbar(d) {
 }
 
 export function render(d) {
+  if (d?.__timeline) return timeline.render(d);
   return h`<div class="board-page">${toolbar(d)}<div class="board-scroll" id="board-host" data-scroll="board-x">${boardHTML(d)}</div></div>`;
 }
 function paintBoard() {
@@ -255,6 +258,6 @@ export function bindBoard(root) {
   });
 }
 
-export function mount(el) { const host = $('#board-host', el); if (host && !host.dataset.bound) { host.dataset.bound = '1'; bindBoard(host); } }
+export function mount(el, d) { if (d?.__timeline) { timeline.mount(el); return; } const host = $('#board-host', el); if (host && !host.dataset.bound) { host.dataset.bound = '1'; bindBoard(host); } }
 
 export default { id: 'board', title: '看板', sub: '建议 → 排队 → 执行 → 等你 → 完成，拖拽卡片即可接受或忽略', icon: 'kanban', load, render, mount, skeleton: skeletonList, busy: boardBusy };
