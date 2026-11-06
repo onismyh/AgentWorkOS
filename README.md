@@ -61,3 +61,7 @@ scripts/   安装、服务注册、awos.cmd
 var/       运行数据（不进 git）：awos.db、runs/、workspaces/、artifacts/、logs/、backups/、context/
 runtime/   便携 Node、Pi、DSH（不进 git）
 ```
+
+## 许可证
+
+以 [MIT 许可证](LICENSE) 发布。Pi、DSH、Node、gh 等第三方运行时由安装脚本下载到 `runtime/`（不随本仓库分发），各自遵循其许可证。
