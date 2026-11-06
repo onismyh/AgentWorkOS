@@ -157,7 +157,9 @@ def suggest_network(task: dict, run_id: str, proposed: list[dict], out_status: s
     hosts: list[str] = []
     for r in rows:
         for h in (repo.loads(r["data"], {}) or {}).get("hosts") or []:
-            h = str(h).split(":")[0].lower()
+            h = str(h).lower()
+            if ":" in h or " " in h:   # other ports / TLS-name mismatches: approving a domain would not change those
+                continue
             if valid_domain(h) and h not in hosts:
                 hosts.append(h)
     have = set((task.get("meta") or {}).get("network_allow") or [])

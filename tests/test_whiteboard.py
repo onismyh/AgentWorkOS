@@ -417,7 +417,8 @@ def test_blocked_domains_become_a_suggestion_when_the_agent_did_not_ask(git_env)
     from awos import repo as db
     from awos.hitl import outbox
     task = _task_with(level=3)
-    db.add_run_event("run_d", "network_denied", None, {"hosts": ["files.example.net", "127.0.0.1:8765", "files.example.net"]})
+    db.add_run_event("run_d", "network_denied", None, {"hosts": ["files.example.net", "127.0.0.1:8765", "files.example.net",
+                                                                 "other.example.net:8443", "a.example.net (TLS for b.example.net)"]})
     assert outbox.create_from_result(task, "run_d", {"status": "completed", "proposed_actions": []}) == []   # done anyway: no nagging
     ids = outbox.create_from_result(task, "run_d", {"status": "blocked", "proposed_actions": []})
     (a,) = [db.get_approval(i) for i in ids]

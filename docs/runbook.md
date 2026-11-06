@@ -131,6 +131,8 @@ DeepSeek 账号登录只能给 dsh 用；pi 需要 DeepSeek 开放平台的 API 
 
 四个执行器在 macOS 上都实测过：在工作区里 `npm install` 成功；访问 example.com、读 `~/.ssh` 里的探针文件、写工作区外、读 `var/api_token`、连本机服务器都被拦下。
 
+**已知限制**：过滤代理检查的是域名和 TLS 握手里的目标域名（SNI），看不到 TLS 里面的 HTTP `Host` 头。所以在 pypi.org、files.pythonhosted.org 这类放在 Fastly 等 CDN 上的站点，改 `Host` 头仍能访问同一 CDN 上的其他站点（域名伪装）。要彻底堵上只能解密 TLS，所以没有做。影响范围：用默认名单的任务；带邮件或私人内容的任务没有默认名单，不受影响。
+
 所有执行器的环境变量都会去掉看起来像凭据的变量，只保留各自登录要用的前缀。Windows/Linux 上 codex、dsh 用各自的原生沙箱，claude 在 Linux 上有 bubblewrap 时才开沙箱。
 
 ### 2.4 Git：agent 分支

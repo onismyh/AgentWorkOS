@@ -53,7 +53,8 @@ def valid_domain(d: str) -> bool:
     d = (d or "").strip().lower().rstrip(".")
     if d.startswith("*."):
         base = d[2:]
-        return base.count(".") >= 1 and valid_host(base) and base not in SHARED_SUFFIXES
+        shared = any(base == s or base.endswith("." + s) for s in SHARED_SUFFIXES)   # *.s3.amazonaws.com too
+        return base.count(".") >= 1 and valid_host(base) and not shared
     return "." in d and valid_host(d)
 
 
@@ -210,8 +211,8 @@ class _Handler(socketserver.StreamRequestHandler):
             else:
                 u = urlsplit(target)
                 host, port = u.hostname or "", u.port or 80
-                hosthdr = next((h.split(b":", 1)[1].strip().decode("latin-1").lower() for h in headers
-                                if h.lower().startswith(b"host:")), "")
+                hosts = [h.split(b":", 1)[1].strip().decode("latin-1").lower() for h in headers if h.lower().startswith(b"host:")]
+                hosthdr = hosts[0] if len(hosts) == 1 else ""      # exactly one Host header, naming the URL's host
                 if u.scheme != "http" or hosthdr.split(":")[0] != host.lower() or not srv.check(host, port):
                     return self._deny()
                 upstream = srv.connect_plain(host, port)

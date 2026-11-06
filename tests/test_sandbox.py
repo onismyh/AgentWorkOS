@@ -313,7 +313,8 @@ def test_egress_proxy_allowlist_and_internal_addresses(tmp_path):
     from awos.executors.egress import EgressProxy, host_allowed, valid_domain
     assert valid_domain("pypi.org") and valid_domain("*.github.com")
     assert not any(valid_domain(d) for d in ("*.com", "127.0.0.1", "localhost", "", "a b.com", "*", "127.1", "0x7f.0.0.1",
-                                             "*.co.uk", "*.github.io", "*.workers.dev", "evil.com#.example.com"))
+                                             "*.co.uk", "*.github.io", "*.workers.dev", "evil.com#.example.com",
+                                             "*.s3.amazonaws.com", "*.foo.pages.dev"))
     assert not host_allowed("evil.com#.example.com", ["*.example.com"]) and not host_allowed("127.1", ["127.1"])
     assert host_allowed("files.github.com", ["*.github.com"]) and not host_allowed("github.com", ["*.github.com"])
     assert not host_allowed("evilgithub.com", ["*.github.com", "github.com"])
@@ -375,6 +376,10 @@ def test_egress_proxy_requires_the_tls_name_to_match_the_tunnel(monkeypatch):
         c = socket.create_connection(("127.0.0.1", px.port), timeout=5)
         c.sendall(b"GET http://registry.npmjs.org/ HTTP/1.1\r\nHost: evil.example\r\n\r\n")
         assert b" 403" in c.recv(200)                                   # plain HTTP: Host must name the URL's host
+        c.close()
+        c = socket.create_connection(("127.0.0.1", px.port), timeout=5)
+        c.sendall(b"GET http://registry.npmjs.org/ HTTP/1.1\r\nHost: registry.npmjs.org\r\nHost: evil.example\r\n\r\n")
+        assert b" 403" in c.recv(200)                                   # ... and only one of them
         c.close()
 
 
